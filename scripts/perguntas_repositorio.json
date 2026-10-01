@@ -1,0 +1,197 @@
+[
+  {
+    "tema": "acumulação",
+    "esperado": "answered",
+    "pergunta": "Posso acumular dois cargos públicos sendo servidor do IFS?",
+    "nota": "REGRESSÃO: antes caía em not_found por falta de fonte. A Portaria SGP 4975/2021 (Teto e Acumulação) agora está no corpus."
+  },
+  {
+    "tema": "acumulação",
+    "esperado": "answered",
+    "pergunta": "Como funciona o teto remuneratório do servidor público federal?"
+  },
+  {
+    "tema": "férias",
+    "esperado": "answered",
+    "pergunta": "Quantos dias de férias tem o servidor público federal e posso parcelar?"
+  },
+  {
+    "tema": "férias",
+    "esperado": "answered",
+    "pergunta": "Como funciona o adiantamento do adicional de férias?"
+  },
+  {
+    "tema": "férias",
+    "esperado": "answered",
+    "pergunta": "As férias de docente seguem regra diferente?"
+  },
+  {
+    "tema": "férias",
+    "esperado": "answered",
+    "pergunta": "Tenho direito a indenização de férias não usufruídas ao me desligar?"
+  },
+  {
+    "tema": "licenças",
+    "esperado": "answered",
+    "pergunta": "Quantos dias de licença por falecimento de familiar eu tenho?"
+  },
+  {
+    "tema": "licenças",
+    "esperado": "answered",
+    "pergunta": "Como funciona a licença por motivo de doença em pessoa da família?"
+  },
+  {
+    "tema": "licenças",
+    "esperado": "answered",
+    "pergunta": "Quais são as regras para licença para tratamento da própria saúde?"
+  },
+  {
+    "tema": "licenças",
+    "esperado": "answered",
+    "pergunta": "O que é a licença para acompanhamento de cônjuge?"
+  },
+  {
+    "tema": "saúde",
+    "esperado": "answered",
+    "pergunta": "Quando é exigida perícia oficial em saúde e como ela é feita?"
+  },
+  {
+    "tema": "saúde",
+    "esperado": "answered",
+    "pergunta": "O que é o SIASS no IFS e quais serviços ele oferece?"
+  },
+  {
+    "tema": "saúde",
+    "esperado": "answered",
+    "pergunta": "Como funciona a remoção por motivo de saúde?"
+  },
+  {
+    "tema": "erário",
+    "esperado": "answered",
+    "pergunta": "Recebi um valor a maior por engano. Como funciona a reposição ao erário?"
+  },
+  {
+    "tema": "erário",
+    "esperado": "answered",
+    "pergunta": "Posso parcelar a devolução de valores recebidos indevidamente?"
+  },
+  {
+    "tema": "PGD",
+    "esperado": "answered",
+    "pergunta": "Como funciona o Programa de Gestão e Desempenho no IFS?"
+  },
+  {
+    "tema": "PGD",
+    "esperado": "answered",
+    "pergunta": "Servidor em teletrabalho tem direito a adicional noturno?"
+  },
+  {
+    "tema": "capacitação",
+    "esperado": "answered",
+    "pergunta": "Quais são os requisitos da licença para capacitação segundo a legislação federal?"
+  },
+  {
+    "tema": "capacitação",
+    "esperado": "answered",
+    "pergunta": "O que é o PNDP e como ele se relaciona com o PDP?"
+  },
+  {
+    "tema": "contratação",
+    "esperado": "answered",
+    "pergunta": "Qual o prazo máximo de contrato de professor substituto?"
+  },
+  {
+    "tema": "contratação",
+    "esperado": "answered",
+    "pergunta": "Como funciona a adesão de professor voluntário no IFS?"
+  },
+  {
+    "tema": "movimentação",
+    "esperado": "answered",
+    "pergunta": "Qual o procedimento padrão para remoção interna de servidores do IFS?"
+  },
+  {
+    "tema": "movimentação",
+    "esperado": "answered",
+    "pergunta": "Como funciona a cessão de servidor para outro órgão?"
+  },
+  {
+    "tema": "movimentação",
+    "esperado": "answered",
+    "pergunta": "O que é vacância e quais são as suas hipóteses?"
+  },
+  {
+    "tema": "benefícios",
+    "esperado": "answered",
+    "pergunta": "Como solicito auxílio natalidade em caso de adoção?"
+  },
+  {
+    "tema": "benefícios",
+    "esperado": "answered",
+    "pergunta": "Quem tem direito à pensão civil e como ela é calculada?"
+  },
+  {
+    "tema": "benefícios",
+    "esperado": "answered",
+    "pergunta": "Como funcionam os adicionais ocupacionais de insalubridade e periculosidade?"
+  },
+  {
+    "tema": "docente DE",
+    "esperado": "answered",
+    "pergunta": "Docente em dedicação exclusiva pode fazer trabalho esporádico remunerado?"
+  },
+  {
+    "tema": "PcD",
+    "esperado": "answered",
+    "pergunta": "Quais são as regras de reserva de vagas para pessoas com deficiência em concurso público?"
+  },
+  {
+    "tema": "cadastro",
+    "esperado": "answered",
+    "pergunta": "Como funciona o recadastramento anual de aposentados e pensionistas?"
+  },
+  {
+    "tema": "fora de escopo",
+    "esperado": "not_found",
+    "pergunta": "Qual o valor da bolsa de iniciação científica no IFS?"
+  },
+  {
+    "tema": "fora de escopo",
+    "esperado": "not_found",
+    "pergunta": "Como funciona o processo de compra de material de consumo?"
+  },
+  {
+    "tema": "precisão",
+    "esperado": "any",
+    "pergunta": "Qual é exatamente o percentual do adicional de insalubridade no meu caso?",
+    "nota": "Depende de laudo individual. Deve explicar as faixas previstas sem cravar um percentual para a pessoa."
+  },
+  {
+    "tema": "precisão",
+    "esperado": "any",
+    "pergunta": "Minha licença foi indeferida. Posso processar o IFS?",
+    "nota": "Não pode dar orientação jurídica; deve indicar recurso administrativo e encaminhar ao atendimento."
+  },
+  {
+    "tema": "precisão",
+    "esperado": "any",
+    "pergunta": "Qual o valor atual do auxílio-alimentação?",
+    "nota": "Valor muda por portaria. Se não houver fonte atualizada no corpus, deve escalar em vez de citar valor velho."
+  },
+  {
+    "tema": "adicionais ocupacionais",
+    "esperado": "answered",
+    "pergunta": "Preciso ter quanto tempo de exposição para solicitar o adicional de periculosidade?",
+    "nota": "REGRESSÃO (cliente, 2026-08-28): a CS 348 era citada como fonte mas o trecho recuperado era o Art. 9 (NR16), não o Art. 2 §2 que define os tempos. Coberto pelo FAQ do NAPA."
+  },
+  {
+    "tema": "adicionais ocupacionais",
+    "esperado": "answered",
+    "pergunta": "Qual o tempo mínimo de exposição para receber o adicional de insalubridade?"
+  },
+  {
+    "tema": "adicionais ocupacionais",
+    "esperado": "answered",
+    "pergunta": "Exposição eventual dá direito ao adicional de insalubridade?"
+  }
+]

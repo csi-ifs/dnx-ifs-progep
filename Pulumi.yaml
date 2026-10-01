@@ -1,0 +1,7 @@
+name: assistente-progep-ifs
+description: Assistente Inteligente PROGEP-IFS (Contact Center PROGEP) - IaC
+runtime:
+  name: python
+  options:
+    toolchain: pip
+main: .

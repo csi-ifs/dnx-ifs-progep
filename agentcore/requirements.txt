@@ -1,0 +1,6 @@
+# Dependências do container do AgentCore Runtime.
+bedrock-agentcore>=0.1.0
+# Instrumentação OTEL para a observabilidade do AgentCore (traces/spans).
+aws-opentelemetry-distro>=0.10.0
+# boto3 recente (bedrock-agent-runtime RetrieveAndGenerate + inference profiles).
+boto3>=1.40

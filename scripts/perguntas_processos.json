@@ -1,0 +1,115 @@
+[
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Quais setores analisam meu pedido de licença para capacitação?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Quais são as etapas do processo de aposentadoria voluntária?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Depois que eu protocolo o pedido de progressão por capacitação, para onde vai o processo?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "O que a CGU analisa no processo de admissão de servidor?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Como funciona o processo de auxílio funeral?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Quais as etapas para adesão ao plano de saúde GEAP?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Como tramita um pedido de isenção de imposto de renda?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Quais setores participam do processo de cessão de servidor do IFS para outro órgão?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Como funciona o processo de contratação de professor substituto?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Quais são as etapas do processo de auxílio transporte?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Como funciona o pagamento de GECC para servidor do IFS?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "O que acontece no processo de licença maternidade?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Como é o fluxo do abono de permanência?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Quais as etapas da remoção a pedido?"
+  },
+  {
+    "tema": "trâmite",
+    "esperado": "answered",
+    "pergunta": "Como funciona o processo de reposição ao erário?"
+  },
+  {
+    "tema": "sistemas",
+    "esperado": "answered",
+    "pergunta": "Em quais sistemas o IFS registra a admissão de um servidor?"
+  },
+  {
+    "tema": "sistemas",
+    "esperado": "answered",
+    "pergunta": "O que é o Assentamento Funcional Digital e quando ele é usado?"
+  },
+  {
+    "tema": "sistemas",
+    "esperado": "answered",
+    "pergunta": "Para que serve o E-Pessoal nos processos da PROGEP?"
+  },
+
+  {
+    "tema": "fora de escopo",
+    "esperado": "not_found",
+    "pergunta": "Quais as etapas do processo de compra de equipamentos de informática?"
+  },
+  {
+    "tema": "fora de escopo",
+    "esperado": "not_found",
+    "pergunta": "Como tramita um processo de matrícula de aluno no IFS?"
+  },
+  {
+    "tema": "precisão",
+    "esperado": "any",
+    "pergunta": "Quanto tempo cada etapa do processo de aposentadoria demora?",
+    "nota": "Os fluxogramas não trazem prazos por etapa. Não pode inventar prazo — ou responde o que há, ou escala."
+  },
+  {
+    "tema": "precisão",
+    "esperado": "any",
+    "pergunta": "Meu processo de licença está parado, em que setor ele está?",
+    "nota": "É consulta a caso individual: deve explicar o fluxo geral e encaminhar para atendimento, sem simular consulta ao SEI."
+  }
+]
