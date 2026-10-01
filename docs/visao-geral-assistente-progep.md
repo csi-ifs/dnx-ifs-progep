@@ -209,6 +209,34 @@ auditoria geral, mantido pela organização. O registro criado pelo projeto
 duplica esse trabalho, e a AWS cobra a segunda cópia. Ajustá-lo reduz o custo
 fixo para cerca de US$ 2 a 3 por mês, sem perda de auditoria.
 
+### Base de conhecimento
+
+**Quanto custou montar a base atual** (cerca de 420 documentos, medido na
+fatura e no uso do modelo de julho a setembro de 2026):
+
+| Item | Custo |
+|---|---|
+| Transcrição dos 94 fluxogramas do Mapeamento de Processos (imagens lidas pelo modelo Claude) | cerca de US$ 5,40 |
+| Transcrição de documentos escaneados (PDFs sem texto) | menos de US$ 1 |
+| Preparação dos documentos para a busca (todas as indexações) | US$ 0,09 |
+| Gravação no índice de busca | US$ 0,03 |
+| **Total** | **cerca de US$ 6 a 7, uma única vez** |
+
+Manter a base guardada custa **menos de US$ 0,02 por mês**: são cerca de
+170 MB de documentos e 12.600 trechos no índice de busca.
+
+**Quanto custa acrescentar documentos novos:**
+
+| Tipo de documento | Custo estimado |
+|---|---|
+| Documento com texto (PDF digital, Word, HTML, texto) | praticamente zero: menos de US$ 0,001 por documento. Cem documentos de 20 páginas custam menos de US$ 0,05 |
+| PDF escaneado (precisa ser transcrito) | cerca de US$ 0,02 por página. Um documento de 20 páginas sai por cerca de US$ 0,40 |
+| Fluxograma em imagem | cerca de US$ 0,06 por fluxograma (valor medido) |
+
+Ou seja: enviar documentos pelo painel do acervo não pesa no custo. Só a
+transcrição de material em imagem tem custo perceptível, e ela é feita uma
+única vez por documento.
+
 ### Visão geral
 
 | Cenário | Custo mensal aproximado |
