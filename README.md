@@ -10,8 +10,6 @@ humano no Amazon Connect e infraestrutura como código em Pulumi (Python).
 >   apresentação para o cliente (o que é, como funciona, serviços, custos, painel do acervo).
 > - [docs/documentacao-tecnica.md](docs/documentacao-tecnica.md): arquitetura
 >   deployada, serviços, passo a passo de deploy, Meta/WhatsApp, acervo e troubleshooting.
-> - [docs/whatsapp-numero-teste.md](docs/whatsapp-numero-teste.md): runbook do
->   número de teste do WhatsApp (histórico; produção usa o número do IFS).
 >
 > O vector store deployado é **Amazon S3 Vectors** (não OpenSearch Serverless, que
 > era o design de referência) — escolha por custo. O agente roda no **Bedrock

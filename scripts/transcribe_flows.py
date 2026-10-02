@@ -53,9 +53,9 @@ S3_PREFIX = "site/mapeamento-processos"
 #: Inference profile do Claude Sonnet 4.5 (mesmo modelo usado pelo agente).
 DEFAULT_MODEL = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
-#: Limites de imagem do Bedrock: 3,75 MB e 8000 px por lado.
+#: Limite de imagem do Bedrock: 3,75 MB (e 8000 px por lado, que as fatias
+#: abaixo nunca alcançam).
 MAX_IMAGE_BYTES = 3_750_000
-MAX_IMAGE_SIDE = 8000
 
 #: Lado máximo antes de o pipeline de visão reduzir a imagem. Fluxograma BPMN
 #: tem texto pequeno: um diagrama de 2800 px vira 1568 px e o texto cai para

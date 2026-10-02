@@ -38,3 +38,6 @@ docs/fluxos/
 
 # Saída do scripts/run_qa_suite.py
 relatorio.md
+
+# Configuração local das ferramentas (Claude Code)
+.claude/

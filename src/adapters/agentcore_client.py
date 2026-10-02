@@ -1,6 +1,6 @@
 """Cliente para invocar o Agente_IA hospedado no Bedrock AgentCore Runtime.
 
-Após a migração para arquitetura única, os handlers (API do site e webhook do
+Após a migração para arquitetura única, os handlers (API do site e Lambda do
 WhatsApp) não executam mais o fluxo Agentic RAG in-process: eles **invocam o
 AgentCore Runtime** (`bedrock-agentcore invoke-agent-runtime`), que roda o
 container com o `BedrockAgentAdapter`. Este adapter é a fronteira de I/O dessa

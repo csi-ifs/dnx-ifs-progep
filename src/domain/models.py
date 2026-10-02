@@ -7,7 +7,7 @@ Interfaces section).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 

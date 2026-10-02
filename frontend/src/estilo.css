@@ -36,6 +36,7 @@ h2 {
 
 .topo {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1.5rem;
   padding: 0.85rem 1.5rem;
@@ -253,3 +254,195 @@ button:disabled {
   padding: 0.45rem 0.6rem;
   border-radius: 6px;
 }
+
+/* --- Aba de custos ------------------------------------------------------------
+   Cores das séries: as três primeiras posições da paleta categórica validada
+   (scripts/validate_palette.js do skill de dataviz, superfície branca). A terceira
+   fica abaixo de 3:1 sobre o branco — por isso legenda e tabela sempre presentes. */
+:root {
+  --serie-assistente: #2a78d6;
+  --serie-documentos: #eb6834;
+  --serie-infraestrutura: #1baf7a;
+  --grade: #e1e0d9;
+  --eixo: #c3c2b7;
+  --tinta-suave: #898781;
+}
+
+.custos .alerta {
+  margin: 0;
+}
+.destaque {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+.destaque > div:first-child {
+  display: flex;
+  flex-direction: column;
+}
+.rotulo-figura {
+  font-size: 0.85rem;
+  color: var(--cinza);
+}
+.figura {
+  font-size: 3rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+.destaque .ajuda {
+  margin: 0.25rem 0 0;
+}
+.figuras {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 1rem;
+}
+.figura-pequena {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.figura-pequena .valor {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+.periodos {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.periodos .aba {
+  background: #fff;
+  border: 1px solid var(--borda);
+}
+.periodos .aba.ativa {
+  background: var(--verde-claro);
+  border-color: var(--verde-claro);
+}
+
+.cota {
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.cota .ajuda {
+  margin: 0;
+}
+.medidor {
+  height: 8px;
+  border-radius: 4px;
+  background: #cde2fb;
+  overflow: hidden;
+}
+.medidor-uso {
+  height: 100%;
+  background: var(--serie-assistente);
+  border-radius: 4px;
+}
+.medidor-uso.alto {
+  background: var(--ambar);
+}
+
+.legenda {
+  list-style: none;
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  padding: 0;
+  margin: 0 0 0.75rem;
+  font-size: 0.88rem;
+}
+.amostra {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 0.4rem;
+  vertical-align: -1px;
+}
+.amostra.serie-assistente,
+path.serie-assistente {
+  background: var(--serie-assistente);
+  fill: var(--serie-assistente);
+}
+.amostra.serie-documentos,
+path.serie-documentos {
+  background: var(--serie-documentos);
+  fill: var(--serie-documentos);
+}
+.amostra.serie-infraestrutura,
+path.serie-infraestrutura {
+  background: var(--serie-infraestrutura);
+  fill: var(--serie-infraestrutura);
+}
+
+.grafico {
+  position: relative;
+  width: 100%;
+}
+.grafico svg {
+  display: block;
+}
+.grafico .grade {
+  stroke: var(--grade);
+  stroke-width: 1;
+}
+.grafico .eixo {
+  stroke: var(--eixo);
+  stroke-width: 1;
+}
+.grafico .marca {
+  fill: var(--tinta-suave);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.dica {
+  position: absolute;
+  top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 200px;
+  padding: 0.5rem 0.65rem;
+  background: #fff;
+  border: 1px solid var(--borda);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  font-size: 0.82rem;
+  pointer-events: none;
+}
+
+.tabela .numero {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tabela .grupo td {
+  font-weight: 600;
+  background: var(--fundo);
+}
+.tabela .recuo {
+  padding-left: 1.6rem;
+}
+.tabela .total td {
+  font-weight: 600;
+  border-bottom: none;
+}
+.notas ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--cinza);
+  font-size: 0.88rem;
+}
+.notas li + li {
+  margin-top: 0.35rem;
+}
+
+.nota-figura {
+  margin: 0;
+  font-size: 0.78rem;
+}
+

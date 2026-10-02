@@ -15,7 +15,6 @@ import pytest
 
 from src.adapters.monitor_adapter import (
     DEFAULT_NAMESPACE,
-    SESSION_DIMENSION,
     MonitorAdapter,
     RecordResult,
 )
@@ -48,12 +47,9 @@ def test_record_token_usage_emits_input_and_output_metrics_per_session():
     output_metric = _metric_by_name(metric_data, "OutputTokens")
     assert input_metric["Value"] == 120.0
     assert output_metric["Value"] == 45.0
-    assert input_metric["Dimensions"] == [
-        {"Name": SESSION_DIMENSION, "Value": "sess-1"}
-    ]
-    assert output_metric["Dimensions"] == [
-        {"Name": SESSION_DIMENSION, "Value": "sess-1"}
-    ]
+    # Sem dimensão por sessão: uma série por métrica, não duas por conversa.
+    assert input_metric["Dimensions"] == []
+    assert output_metric["Dimensions"] == []
 
 
 @pytest.mark.unit
@@ -70,9 +66,14 @@ def test_record_response_emits_response_metric_per_session():
     length_metric = _metric_by_name(metric_data, "ResponseLength")
     assert responses_metric["Value"] == 1.0
     assert length_metric["Value"] == float(len("olá, tudo certo"))
-    assert responses_metric["Dimensions"] == [
-        {"Name": SESSION_DIMENSION, "Value": "sess-2"}
-    ]
+    assert responses_metric["Dimensions"] == []
+
+
+@pytest.mark.unit
+def test_sessao_fica_no_log_e_nao_na_metrica(caplog):
+    caplog.set_level("INFO", logger="src.adapters.monitor_adapter")
+    _adapter(MagicMock()).record_token_usage("sess-9", 3, 1)
+    assert "sess-9" in caplog.text
 
 
 @pytest.mark.unit

@@ -249,3 +249,39 @@ def test_falha_no_envio_sobe():
 
     with pytest.raises(RuntimeError):
         cliente.send_text(ARN_NUMERO, "557900001234", "resposta")
+
+
+# --- parse_inbound_messages (formato do webhook da Meta, dentro do evento SNS) ----
+
+def _entrada_meta(*, msg_type="text", text="oi", from_number="5579999", msg_id="wamid.1"):
+    inner = {"from": from_number, "id": msg_id, "type": msg_type}
+    if msg_type == "text":
+        inner["text"] = {"body": text}
+    return {"entry": [{"changes": [{"value": {"metadata": {"phone_number_id": "PNID-1"},
+                                              "messages": [inner]}}]}]}
+
+
+def test_parse_inbound_extracts_text_message():
+    from src.adapters.whatsapp_social import parse_inbound_messages
+
+    msgs = parse_inbound_messages(_entrada_meta(text="Como peço férias?"))
+    assert len(msgs) == 1
+    m = msgs[0]
+    assert (m.text, m.from_number, m.message_id) == ("Como peço férias?", "5579999", "wamid.1")
+    assert m.part_types == ("text",)
+    assert m.phone_number_id == "PNID-1"
+
+
+def test_parse_inbound_media_message_has_empty_text_and_media_part_type():
+    from src.adapters.whatsapp_social import parse_inbound_messages
+
+    msgs = parse_inbound_messages(_entrada_meta(msg_type="image"))
+    assert msgs[0].text == ""
+    assert msgs[0].part_types == ("image",)
+
+
+def test_parse_inbound_empty_payload_returns_empty():
+    from src.adapters.whatsapp_social import parse_inbound_messages
+
+    assert parse_inbound_messages({}) == []
+    assert parse_inbound_messages({"entry": [{"changes": [{"value": {}}]}]}) == []

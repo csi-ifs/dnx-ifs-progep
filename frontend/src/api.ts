@@ -153,6 +153,55 @@ export function removerDocumento(
   return chamar(api, token, "DELETE", "/acervo/documentos", { chave });
 }
 
+export type Periodo = "hoje" | "7d" | "30d" | "mes" | "mes_anterior";
+export type Categoria = "assistente" | "documentos" | "infraestrutura";
+
+export type ItemDeCusto = {
+  item: string;
+  categoria: Categoria;
+  rotulo: string;
+  unidade: string;
+  usd: number;
+  quantidade: number;
+};
+
+/** O que `GET /acervo/custos` devolve (src/domain/custos.py:resumir). */
+export type ResumoDeCustos = {
+  periodo: Periodo;
+  inicio: string;
+  fim: string;
+  hoje: string;
+  total_usd: number;
+  por_categoria: Record<Categoria, number>;
+  categorias: Record<Categoria, string>;
+  dias: ({ dia: string } & Record<Categoria, number>)[];
+  itens: ItemDeCusto[];
+  perguntas: number;
+  custo_por_pergunta_usd: number | null;
+  projecao_mes_usd: number | null;
+  media_diaria_usd: number | null;
+  meta: { entregues_no_mes: number; cota: number; isento: boolean };
+  conferencia: { ate: string; medido_usd: number; faturado_usd: number } | null;
+  atualizado_em: string | null;
+};
+
+export function buscarCustos(
+  api: string,
+  token: string,
+  periodo: Periodo,
+): Promise<ResumoDeCustos> {
+  return chamar(api, token, "GET", `/acervo/custos?periodo=${periodo}`);
+}
+
+/** Dólar em pt-BR; valores abaixo de um centavo ganham casas, senão viram "0,00". */
+export function formatarUsd(valor: number): string {
+  const casas = valor !== 0 && Math.abs(valor) < 0.01 ? 4 : 2;
+  return `US$ ${valor.toLocaleString("pt-BR", {
+    minimumFractionDigits: casas,
+    maximumFractionDigits: casas,
+  })}`;
+}
+
 export function formatarBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;

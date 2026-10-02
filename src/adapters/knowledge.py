@@ -158,11 +158,6 @@ def client_error_code(exc: Exception) -> str | None:
     return None
 
 
-def is_coalescible_error(exc: Exception) -> bool:
-    """Return ``True`` when a start-job failure can be coalesced (debounce)."""
-    return client_error_code(exc) in COALESCIBLE_ERROR_CODES
-
-
 @dataclass(frozen=True)
 class IngestionJob:
     """Result of triggering/scheduling a Knowledge Base ingestion job.

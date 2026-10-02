@@ -9,6 +9,7 @@
 | ``GET /acervo/documentos``  | admin | o acervo (lido do S3), com procedência       |
 | ``GET /acervo/conferencia`` | admin | compara o bucket com a base                  |
 | ``DELETE /acervo/documentos``| admin | remoção reversível (lixeira + KB)          |
+| ``GET /acervo/custos``      | admin | custos do assistente (aba "Custos")         |
 
 **Por que ``POST /acervo/indexar`` é o único caminho para a base.** O envio cai
 no bucket de preparo, que nenhum data source varre e nenhuma notificação
@@ -30,7 +31,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Callable, Mapping
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Mapping
 from urllib.parse import quote, unquote
 
 from src.domain.acervo import (
@@ -364,6 +366,51 @@ def _remover_documento(
     }
 
 
+#: Períodos da aba de custos → (início, fim) a partir de hoje (fuso do IFS).
+PERIODOS_DE_CUSTO = ("hoje", "7d", "30d", "mes", "mes_anterior")
+
+
+def intervalo_do_periodo(periodo: str, hoje: date) -> tuple[date, date]:
+    if periodo == "hoje":
+        return hoje, hoje
+    if periodo == "7d":
+        return hoje - timedelta(days=6), hoje
+    if periodo == "30d":
+        return hoje - timedelta(days=29), hoje
+    if periodo == "mes_anterior":
+        fim = hoje.replace(day=1) - timedelta(days=1)
+        return fim.replace(day=1), fim
+    if periodo == "mes":
+        return hoje.replace(day=1), hoje
+    raise PedidoInvalido(f"Período inválido; use um de: {', '.join(PERIODOS_DE_CUSTO)}.")
+
+
+def _custos(evento: Mapping[str, Any], loja: Any, hoje: date | None = None) -> dict:
+    """Custos medidos do período, a conferência com a fatura e a cota da Meta."""
+    from src.domain import custos as dom
+
+    parametros = evento.get("queryStringParameters") or {}
+    hoje = hoje or dom.hoje_local()
+    periodo = str(parametros.get("periodo") or "mes")
+    inicio, fim = intervalo_do_periodo(periodo, hoje)
+    linhas = loja.custos(inicio, fim)
+    faturas = loja.faturas(inicio, fim)
+    # Projeção: média dos últimos 30 dias fechados (hoje fica de fora, incompleto).
+    media = None
+    if periodo == "mes":
+        media = dom.media_diaria(loja.custos(hoje - timedelta(days=30), hoje - timedelta(days=1)))
+    agora = datetime.now(timezone.utc)
+    resumo = dom.resumir(
+        linhas, inicio=inicio, fim=fim, hoje=hoje, faturas=faturas,
+        entregues_meta_mes=loja.ler_contador(agora.strftime("%Y-%m"), "meta_entregues"),
+        meta_isento=os.environ.get("CUSTOS_META_ISENTO", "").lower() in ("1", "true", "sim"),
+        media_diaria=media,
+    )
+    resumo["periodo"] = periodo
+    resumo["conferencia"] = dom.conferir_modelo(linhas, faturas)
+    return resumo
+
+
 # --- Roteamento -----------------------------------------------------------------
 
 def handler(
@@ -372,6 +419,7 @@ def handler(
     *,
     s3_client: Any = None,
     kb_client: Any = None,
+    custos_store: Any = None,
 ) -> dict[str, Any]:
     """Ponto de entrada do painel de acervo."""
     rota = _rota(evento)
@@ -386,6 +434,11 @@ def handler(
         # conferência de grupo vem antes de qualquer leitura de parâmetro.
         exige_admin(grupos_das_claims(claims))
         corpo = _corpo(evento)
+
+        # Antes das variáveis do acervo: a aba de custos não depende delas.
+        if rota == "GET /acervo/custos":
+            loja = custos_store if custos_store is not None else _custos_store()
+            return _resposta(200, _custos(evento, loja))
 
         bucket_documentos = os.environ["KB_BUCKET"]
         bucket_preparo = os.environ["STAGING_BUCKET"]
@@ -441,6 +494,12 @@ def _s3() -> Any:
     import boto3
 
     return boto3.client("s3", region_name=os.environ.get("AWS_REGION"))
+
+
+def _custos_store() -> Any:
+    from src.adapters.custos_store import CustosStore
+
+    return CustosStore(os.environ["CUSTOS_TABLE"], region_name=os.environ.get("AWS_REGION"))
 
 
 def _kb() -> Any:

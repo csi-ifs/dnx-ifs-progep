@@ -44,12 +44,27 @@ def main() -> None:
     # Origem permitida no CORS; em produção aponte para o domínio institucional:
     # pulumi config set progep-ifs:corsAllowOrigin https://www.ifs.edu.br
     cors_allow_origin = pulumi.Config("progep-ifs").get("corsAllowOrigin") or "*"
+    # Controle de custos: e-mails da equipe técnica cujo uso do modelo (testes e
+    # transcrições rodados à mão) conta como custo da PROGEP, e se a Meta
+    # confirmou a isenção de órgão público (as mensagens de serviço deixam de
+    # ser cobradas acima da cota).
+    #   pulumi config set progep-ifs:custosEquipeTecnica a@x.com,b@y.com
+    #   pulumi config set progep-ifs:custosMetaIsento true
+    custos_equipe = pulumi.Config("progep-ifs").get("custosEquipeTecnica") or ""
+    custos_meta_isento = pulumi.Config("progep-ifs").get("custosMetaIsento") or "false"
+    # Trilha própria do CloudTrail: desligada, porque a da organização já cobre a
+    # conta e a segunda cópia é cobrada. Religue se a conta sair da organização:
+    #   pulumi config set progep-ifs:trilhaPropria true
+    trilha_propria = pulumi.Config("progep-ifs").get_bool("trilhaPropria") or False
     provider = configure_provider(region=region)
     solution = define_resources(
         provider=provider,
         region=region,
         agent_runtime_arn=agent_runtime_arn,
         cors_allow_origin=cors_allow_origin,
+        custos_equipe_tecnica=custos_equipe,
+        custos_meta_isento=custos_meta_isento,
+        trilha_propria=trilha_propria,
     )
 
     pulumi.export("environment", stack)
@@ -60,10 +75,6 @@ def main() -> None:
     pulumi.export("documents_bucket", solution.resources["documents_bucket"].bucket)
     pulumi.export(
         "kb_data_source_id", solution.resources["kb_data_source"].data_source_id
-    )
-    pulumi.export(
-        "whatsapp_webhook_url",
-        solution.resources["whatsapp_function_url"].function_url,
     )
     pulumi.export(
         "agentcore_ecr_url", solution.resources["agentcore_ecr"].repository_url

@@ -18,7 +18,6 @@ carry the mandatory ``User_Agent_APN`` billing annotation (Req 8.3, 8.5).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any
@@ -30,6 +29,7 @@ from src.domain.fontes import formatar_fontes
 from src.domain.input_validation import classify_content, validate_message
 from src.domain.social import TipoSocial, classificar_social
 from src.domain.models import AgentRequest, AgentResponse
+from src.domain.privacidade import mascarar_contato
 from src.domain.transbordo import (
     EXPEDIENTE_TEXTO,
     RespostaOferta,
@@ -39,6 +39,11 @@ from src.domain.transbordo import (
 )
 
 logger = logging.getLogger(__name__)
+# O runtime Python da Lambda deixa a raiz em WARNING, e as linhas INFO deste
+# módulo ([entrada], [transbordo], [chat]) **nunca chegavam ao CloudWatch** —
+# achado em 02/10/2026, quando o controle de custos passou a depender delas.
+# Nenhuma traz o texto da mensagem.
+logger.setLevel(logging.INFO)
 
 #: Default relevance threshold (``limiar_relevancia``) when not configured.
 DEFAULT_RELEVANCE_THRESHOLD: float = 0.4
@@ -79,98 +84,7 @@ def api_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     return _api_handler(event, context, invoker=_invoke_agent)
 
 
-# --- Amazon Connect contact flow ------------------------------------------------
-
-#: Texto entregue quando o agente não encontra documento relevante; o contact
-#: flow usa o ``status`` para decidir a transferência ao atendente (Req 2.4, 3.1).
-CONNECT_NOT_FOUND_MESSAGE: str = (
-    "Não encontrei essa informação nos documentos oficiais da PROGEP. "
-    "Vou transferir você para um atendente."
-)
-CONNECT_UNAVAILABLE_MESSAGE: str = (
-    "O atendimento automático está temporariamente indisponível. "
-    "Vou transferir você para um atendente."
-)
-
-
-def _connect_input_text(event: dict[str, Any]) -> str:
-    """Extrai o texto do usuário do evento do contact flow.
-
-    O bloco *Invoke AWS Lambda function* envia os parâmetros em
-    ``Details.Parameters``; o texto capturado pelo *Get customer input* costuma
-    vir em ``Parameters.text`` ou nos atributos do contato.
-    """
-    details = event.get("Details", {}) or {}
-    params = details.get("Parameters", {}) or {}
-    for key in ("text", "Text", "message", "inputText"):
-        value = params.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    attributes = (details.get("ContactData", {}) or {}).get("Attributes", {}) or {}
-    for key in ("text", "message", "lastUserMessage"):
-        value = attributes.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def connect_handler(event: dict[str, Any], context: Any = None) -> dict[str, str]:
-    """Entry point invocado pelo contact flow do Amazon Connect.
-
-    O Connect exige que a resposta seja um objeto **plano** de pares
-    chave/valor string — nada aninhado. Devolvemos ``status``, ``content`` e
-    ``confidence``; o contact flow ramifica no ``status`` para responder ao
-    usuário ou transferir para a fila de atendimento humano (Req 3.1, 3.2).
-    """
-    text = _connect_input_text(event)
-    contact_data = (event.get("Details", {}) or {}).get("ContactData", {}) or {}
-    session_id = str(contact_data.get("ContactId", "") or "connect")
-
-    if not text:
-        return {
-            "status": AgentStatus.UNAVAILABLE.value,
-            "content": "Não recebi sua mensagem. Pode repetir?",
-            "confidence": "0.0",
-        }
-
-    validation = validate_message(text, Channel.SITE.value)
-    if not validation.accepted:
-        return {
-            "status": AgentStatus.UNAVAILABLE.value,
-            "content": validation.reason or "Mensagem inválida.",
-            "confidence": "0.0",
-        }
-
-    request = AgentRequest(
-        session_id=session_id, channel=Channel.WHATSAPP.value, text=text
-    )
-    try:
-        response = _invoke_agent(request)
-    except Exception:
-        logger.exception("Falha ao invocar o Agente_IA a partir do Connect")
-        return {
-            "status": AgentStatus.UNAVAILABLE.value,
-            "content": CONNECT_UNAVAILABLE_MESSAGE,
-            "confidence": "0.0",
-        }
-
-    if response.status == AgentStatus.ANSWERED.value and response.content:
-        content = response.content
-    elif response.status == AgentStatus.NOT_FOUND.value:
-        content = CONNECT_NOT_FOUND_MESSAGE
-    else:
-        content = CONNECT_UNAVAILABLE_MESSAGE
-
-    return {
-        "status": response.status,
-        "content": content,
-        "confidence": f"{response.confidence:.4f}",
-    }
-
-
-# --- WhatsApp Cloud API webhook (caminho interino de teste) --------------------
-# Só é usado com o número de teste da Meta; o caminho de produção é End User
-# Messaging + Connect (src.adapters.whatsapp_connector). Ver whatsapp_cloud.py.
+# --- WhatsApp (End User Messaging Social) --------------------------------------
 
 #: Saudação enviada quando o usuário abre uma conversa nova. Vem **antes** da
 #: resposta, para o servidor saber com quem está falando e o que esperar — em
@@ -269,7 +183,6 @@ WHATSAPP_ANEXO_DO_ATENDENTE: str = (
     "aqui. Peça a ele que envie o conteúdo como texto."
 )
 
-_whatsapp_secret: dict[str, str] | None = None
 _conversas: Any | None = None
 _ponte: Any | None = None
 _ponte_lida = False
@@ -305,25 +218,6 @@ def _get_conversas() -> Any | None:
 
         _conversas = ConversationStore(tabela, region_name=os.environ.get("AWS_REGION"))
     return _conversas
-
-
-def _get_whatsapp_secret() -> dict[str, str]:
-    """Lê (uma vez) o segredo do WhatsApp do Secrets Manager (Req 10.1).
-
-    Espera um JSON com ``verify_token``, ``access_token`` e, opcionalmente,
-    ``app_secret``. O nome/ARN do segredo vem de ``WHATSAPP_SECRET_NAME``.
-    """
-    global _whatsapp_secret
-    if _whatsapp_secret is None:
-        secret_name = os.environ.get("WHATSAPP_SECRET_NAME")
-        if not secret_name:
-            raise RuntimeError("WHATSAPP_SECRET_NAME deve estar definido no ambiente")
-        import boto3
-
-        client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION"))
-        value = client.get_secret_value(SecretId=secret_name)["SecretString"]
-        _whatsapp_secret = json.loads(value)
-    return _whatsapp_secret
 
 
 def _whatsapp_reply_text(response: AgentResponse) -> str:
@@ -364,83 +258,18 @@ def _texto_sem_resposta(setores: tuple[str, ...]) -> str:
     return f"{_NAO_ENCONTRADO}\n\n{formatar_contato(setores)}"
 
 
-def whatsapp_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    """AWS Lambda entry point para o webhook do Meta WhatsApp Cloud API (teste).
-
-    GET → responde ao handshake de verificação da Meta (echo do ``hub.challenge``
-    quando o ``verify_token`` confere). POST → valida a assinatura, extrai as
-    mensagens de texto, encaminha cada uma ao Agente_IA e responde pelo Cloud
-    API. Mídia não textual é descartada com aviso (Req 6.3) e mensagens acima de
-    4096 caracteres são rejeitadas (Req 6.4), reutilizando a lógica de domínio.
-    """
-    from src.adapters.whatsapp_cloud import (
-        WhatsAppCloudClient,
-        parse_inbound_messages,
-        verify_signature,
-        verify_subscription,
-    )
-
-    method = (
-        event.get("httpMethod")
-        or (event.get("requestContext", {}) or {}).get("http", {}).get("method")
-        or ""
-    ).upper()
-    secret = _get_whatsapp_secret()
-
-    # -- GET: verificação do webhook -------------------------------------------
-    if method == "GET":
-        params = event.get("queryStringParameters") or {}
-        challenge = verify_subscription(params, secret.get("verify_token", ""))
-        if challenge is not None:
-            return {"statusCode": 200, "body": challenge}
-        return {"statusCode": 403, "body": "forbidden"}
-
-    # -- POST: mensagens recebidas ---------------------------------------------
-    raw = event.get("body") or ""
-    if isinstance(raw, str):
-        if event.get("isBase64Encoded"):
-            import base64
-
-            raw_bytes = base64.b64decode(raw)
-        else:
-            raw_bytes = raw.encode("utf-8")
-    else:
-        raw_bytes = bytes(raw)
-    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-    if not verify_signature(
-        raw_bytes, headers.get("x-hub-signature-256"), secret.get("app_secret", "")
-    ):
-        logger.warning("Assinatura X-Hub-Signature-256 inválida; descartando payload")
-        return {"statusCode": 403, "body": "invalid signature"}
-
-    try:
-        body = json.loads(raw_bytes.decode("utf-8")) if raw_bytes else {}
-    except (ValueError, UnicodeDecodeError):
-        # A Meta reenvia em não-2xx; responder 200 evita loop de retry de um
-        # payload que nunca vai parsear.
-        return {"statusCode": 200, "body": "ignored"}
-
-    client = WhatsAppCloudClient(secret.get("access_token", ""))
-    processar_mensagens_whatsapp(parse_inbound_messages(body), client)
-
-    # A Meta exige 200 rápido para não reentregar o evento.
-    return {"statusCode": 200, "body": "ok"}
-
-
 def processar_mensagens_whatsapp(mensagens: list[Any], client: Any) -> int:
-    """Atende as mensagens recebidas, **independente do canal de entrada**.
+    """Atende as mensagens recebidas pelo WhatsApp.
 
-    Existe separada dos handlers porque o WhatsApp tem duas entradas: o webhook
-    interino (HTTP da Meta, validado por HMAC) e o End User Messaging Social
-    (evento SNS). O atendimento — mídia recusada, limite de tamanho, "digitando",
-    cortesias, saudação de abertura, sessão e fontes citadas — é o mesmo nos
-    dois; só muda como a mensagem chega e por qual cliente a resposta sai.
+    Separada do handler para ser testável sem SNS: o atendimento — mídia
+    recusada, limite de tamanho, "digitando", cortesias, saudação de abertura,
+    sessão, fontes citadas e transbordo — não depende de como a mensagem chegou.
 
     ``client`` precisa oferecer ``send_text`` e ``mark_read_and_typing`` com a
-    assinatura de :class:`~src.adapters.whatsapp_cloud.WhatsAppCloudClient`. O
-    ``phone_number_id`` de cada mensagem é o **identificador de origem daquele
-    cliente** — para o End User Messaging, o ARN da AWS, não o id da Meta — e é
-    ele que fica gravado para o encerramento por inatividade responder depois.
+    assinatura de :class:`~src.adapters.whatsapp_social.WhatsAppSocialClient`. O
+    ``phone_number_id`` de cada mensagem é o ARN do número na AWS (não o id da
+    Meta), e é ele que fica gravado para o encerramento por inatividade
+    responder depois.
 
     Returns:
         Quantas mensagens foram atendidas (qualquer desfecho, inclusive recusa).
@@ -680,9 +509,8 @@ def _abrir_atendimento(
 def whatsapp_social_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     """Entrada do WhatsApp pelo AWS End User Messaging Social (evento SNS).
 
-    Substitui o webhook interino depois do vínculo da WABA (§6.4 da
-    documentação técnica). Não há HMAC nem segredo da Meta: quem autentica é a
-    AWS, e o tópico só aceita publicação do serviço.
+    Não há HMAC nem segredo da Meta: quem autentica é a AWS, e o tópico só
+    aceita publicação do serviço (§6.4 da documentação técnica).
 
     **O número de origem é trocado antes de atender.** O payload traz o
     ``phone_number_id`` da Meta, mas ``SendWhatsAppMessage`` exige o ARN da
@@ -723,29 +551,21 @@ def _safe_send(client: Any, message: Any, text: str) -> None:
     try:
         client.send_text(message.phone_number_id, message.from_number, text)
     except Exception:  # não deixar uma falha de envio abortar o lote
-        logger.exception("Falha ao enviar resposta WhatsApp para %s", message.from_number)
+        logger.exception(
+            "Falha ao enviar resposta WhatsApp para %s", mascarar_contato(message.from_number)
+        )
 
 
 def _cliente_para_origem(origem: str) -> Any:
-    """Cliente de envio compatível com a origem gravada na conversa.
+    """Cliente de envio para a origem gravada na conversa (o ARN do número).
 
-    Na virada do webhook para o End User Messaging convivem conversas gravadas
-    com o ``phone_number_id`` da Meta (começaram pelo webhook) e com o ARN da
-    AWS (começaram pelo SNS). Cada uma só pode ser encerrada pelo canal por onde
-    começou: o ARN não existe na Graph API, e o id da Meta é recusado pela AWS.
-
-    O segredo da Meta só é lido quando a origem é da Meta — depois da migração
-    ele pode nem existir mais, e o encerramento pelo caminho novo não pode
-    depender dele.
+    Desde a saída do webhook do número de teste (02/10/2026) só existe o End
+    User Messaging. Uma origem que não é ARN (conversa antiga, do webhook) é
+    recusada pela AWS no envio, e o chamador registra a falha.
     """
-    if origem.startswith("arn:"):
-        from src.adapters.whatsapp_social import WhatsAppSocialClient
+    from src.adapters.whatsapp_social import WhatsAppSocialClient
 
-        return WhatsAppSocialClient()
-
-    from src.adapters.whatsapp_cloud import WhatsAppCloudClient
-
-    return WhatsAppCloudClient(_get_whatsapp_secret().get("access_token", ""))
+    return WhatsAppSocialClient()
 
 
 def whatsapp_encerramento_handler(
@@ -774,13 +594,17 @@ def whatsapp_encerramento_handler(
     for conversa in inativas:
         origem = conversa.phone_number_id
         if not origem:
-            logger.warning("Sem phone_number_id para encerrar %s", conversa.user_key)
+            logger.warning(
+                "Sem phone_number_id para encerrar %s", mascarar_contato(conversa.user_key)
+            )
             continue
         try:
             client = _cliente_para_origem(origem)
             client.send_text(origem, conversa.user_key, WHATSAPP_ENCERRAMENTO)
         except Exception:  # noqa: BLE001 - uma falha não pode parar as demais
-            logger.exception("Falha ao encerrar conversa com %s", conversa.user_key)
+            logger.exception(
+                "Falha ao encerrar conversa com %s", mascarar_contato(conversa.user_key)
+            )
             continue
         # Só marca depois do envio: se falhar, a próxima varredura tenta de novo.
         loja.marcar_encerrada(conversa.channel, conversa.user_key)
@@ -801,7 +625,7 @@ def connect_chat_stream_handler(
     Repassar o eco faria o servidor receber de volta cada mensagem que mandou;
     repassar as do sistema entregaria os avisos padrão do Connect, em inglês.
     """
-    from src.adapters.connect_chat import parse_stream_event
+    from src.adapters.connect_chat import PAPEL_ATENDENTE, PAPEL_SERVIDOR, parse_stream_event
 
     eventos = parse_stream_event(event)
     loja = _get_conversas()
@@ -810,6 +634,9 @@ def connect_chat_stream_handler(
 
     entregues = 0
     for ev in eventos:
+        # Cada mensagem do chat é cobrada pelo Connect (controle de custos).
+        if ev.tipo == "MESSAGE" and ev.papel in (PAPEL_SERVIDOR, PAPEL_ATENDENTE) and ev.id:
+            logger.info("[chat] mensagem papel=%s id=%s", ev.papel, ev.id)
         if not (
             ev.mensagem_do_atendente
             or ev.atendente_entrou

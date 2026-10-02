@@ -9,12 +9,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Acervo } from "./componentes/Acervo";
+import { Custos } from "./componentes/Custos";
 import { Documentos } from "./componentes/Documentos";
 import { Login } from "./componentes/Login";
 import { carregarConfig, type Config } from "./config";
 import { sair, sessaoAtual, tokenValido, type Usuario } from "./autenticacao";
 
-type Aba = "acervo" | "documentos";
+type Aba = "acervo" | "documentos" | "custos";
 
 export function App() {
   const [config, setConfig] = useState<Config | null>(null);
@@ -101,6 +102,12 @@ export function App() {
           >
             Documentos na base
           </button>
+          <button
+            className={aba === "custos" ? "aba ativa" : "aba"}
+            onClick={() => setAba("custos")}
+          >
+            Custos
+          </button>
         </nav>
         <div className="usuario">
           <span>{usuario.email}</span>
@@ -116,11 +123,9 @@ export function App() {
         </div>
       </header>
 
-      {aba === "acervo" ? (
-        <Acervo api={config.api} obterToken={obterToken} />
-      ) : (
-        <Documentos api={config.api} obterToken={obterToken} />
-      )}
+      {aba === "acervo" && <Acervo api={config.api} obterToken={obterToken} />}
+      {aba === "documentos" && <Documentos api={config.api} obterToken={obterToken} />}
+      {aba === "custos" && <Custos api={config.api} obterToken={obterToken} />}
     </>
   );
 }

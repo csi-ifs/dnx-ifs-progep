@@ -2,8 +2,9 @@
 
 This adapter performs the *I/O* side of the Monitor_de_Consumo: it emits token
 consumption metrics and response records to Amazon CloudWatch (via
-``put_metric_data``) keyed by ``session_id`` so consumption can be tracked per
-session and surfaced in CloudWatch and the Bedrock AgentCore observability views.
+``put_metric_data``). Metrics are aggregate (no per-session dimension, see
+:data:`METRIC_DIMENSIONS`); the ``session_id`` of each record goes to the log
+line, so consumption is still traceable per session.
 
 Responsibilities mapped to acceptance criteria:
 
@@ -40,6 +41,7 @@ from typing import Any
 
 from src.domain.config import MAX_RETRIES
 from src.domain.monitor import CallRecord, record_llm_failure
+from src.domain.privacidade import mascarar_contato
 from src.domain.retry import RetryOperation, decide_retry
 
 logger = logging.getLogger(__name__)
@@ -47,8 +49,13 @@ logger = logging.getLogger(__name__)
 #: CloudWatch namespace under which consumption metrics are published (Req 7.3).
 DEFAULT_NAMESPACE: str = "ProgepIFS/Assistente/Consumo"
 
-#: CloudWatch dimension name that keys every metric to a session (Req 7.1, 7.2).
-SESSION_DIMENSION: str = "SessionId"
+#: As métricas saem **sem dimensão**. Até 02/10/2026 levavam ``SessionId``, e
+#: cada conversa criava duas séries novas no CloudWatch (186 em duas semanas) —
+#: e série personalizada é cobrada por hora com dado, então o custo crescia com
+#: o número de conversas, não com o volume. A ligação com a sessão (Req 7.1,
+#: 7.2) fica na linha de log de cada registro, que é onde se procura uma
+#: conversa específica; a métrica serve ao agregado.
+METRIC_DIMENSIONS: list[dict[str, str]] = []
 
 # --- Guarded boto3 import -------------------------------------------------------
 # The module must import even when boto3/botocore are absent, so the adapter can
@@ -167,8 +174,8 @@ class MonitorAdapter:
     # -- metric assembly ---------------------------------------------------------
 
     def _session_dimensions(self, session_id: str) -> list[dict[str, str]]:
-        """Build the CloudWatch dimensions keying a metric to ``session_id``."""
-        return [{"Name": SESSION_DIMENSION, "Value": session_id}]
+        """Dimensões das métricas — nenhuma; ver :data:`METRIC_DIMENSIONS`."""
+        return list(METRIC_DIMENSIONS)
 
     def _put_metric_data(self, metric_data: list[dict[str, Any]]) -> None:
         """Publish metric data to CloudWatch (single call)."""
@@ -218,7 +225,7 @@ class MonitorAdapter:
                     logger.warning(
                         "Falha ao registrar %s da sessão %s (tentativa %d/%d): %s",
                         kind,
-                        session_id,
+                        mascarar_contato(session_id),
                         attempts_made,
                         MAX_RETRIES,
                         exc,
@@ -227,7 +234,8 @@ class MonitorAdapter:
                 # Req 7.5: retries exhausted -> surface a session-identifying error.
                 error = (
                     f"falha ao registrar {kind} no CloudWatch para a sessão "
-                    f"{session_id!r} após {attempts_made} tentativas: {last_error}"
+                    f"{mascarar_contato(session_id)!r} após {attempts_made} tentativas: "
+                    f"{last_error}"
                 )
                 logger.error(error)
                 return RecordResult(
@@ -290,6 +298,12 @@ class MonitorAdapter:
                 "Unit": "Count",
             },
         ]
+        logger.info(
+            "Tokens registrados para a sessão %s (entrada=%d, saída=%d)",
+            mascarar_contato(session_id),
+            input_tokens,
+            output_tokens,
+        )
         return self._emit_with_retry(session_id, metric_data, kind="tokens")
 
     def record_response(self, session_id: str, content: str) -> RecordResult:
@@ -331,7 +345,7 @@ class MonitorAdapter:
         # Make the response content observable (AgentCore observability, Req 7.2/7.3).
         logger.info(
             "Resposta registrada para a sessão %s (%d caracteres)",
-            session_id,
+            mascarar_contato(session_id),
             len(content),
         )
         return self._emit_with_retry(session_id, metric_data, kind="resposta")
@@ -395,7 +409,7 @@ class MonitorAdapter:
         except RETRYABLE_EXCEPTIONS as exc:  # pragma: no cover - best-effort path
             logger.warning(
                 "Falha ao emitir métrica de falha de LLM da sessão %s: %s",
-                session_id,
+                mascarar_contato(session_id),
                 exc,
             )
         return new_record

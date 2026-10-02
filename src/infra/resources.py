@@ -51,12 +51,11 @@ from src.domain.iam import (
     build_statement,
     to_policy_document,
 )
-from src.infra.connect_flow import contact_flow_content, transfer_flow_content
+from src.infra.connect_flow import transfer_flow_content
 from src.infra.provider import (
     TaggingExceptionRegistry,
     _require_pulumi,
     configure_provider,
-    pulumi_available,
 )
 
 # --- Guarded Pulumi imports -----------------------------------------------------
@@ -123,15 +122,12 @@ REQUIRED_RESOURCE_SPECS: tuple[ResourceSpec, ...] = (
     ResourceSpec("connect_instance", "connect", True, "Roteador_de_Atendimento (Amazon Connect)"),
     ResourceSpec("connect_queue", "connect", True, "Fila de atendimento humano da PROGEP"),
     ResourceSpec("connect_routing_profile", "connect", True, "Perfil de roteamento dos atendentes"),
-    ResourceSpec("connect_flow", "connect", True, "Contact flow do assistente com escalonamento"),
-    ResourceSpec("connect_lambda", "lambda", True, "Lambda invocada pelo contact flow do Connect"),
     ResourceSpec("connect_transfer_flow", "connect", True, "Contact flow que só enfileira o transbordo do WhatsApp"),
     ResourceSpec("connect_chat_stream_topic", "sns", True, "Tópico SNS do streaming do chat do Connect"),
     ResourceSpec("connect_chat_stream_lambda", "lambda", True, "Lambda que leva a fala do atendente ao WhatsApp"),
     ResourceSpec("whatsapp_messaging", "socialmessaging", True, "Conector_WhatsApp (End User Messaging)"),
-    ResourceSpec("whatsapp_webhook_lambda", "lambda", True, "Webhook Meta Cloud API (canal de teste WhatsApp)"),
-    ResourceSpec("whatsapp_secret", "secretsmanager", True, "Segredo do WhatsApp Cloud API (verify/access token)"),
-    ResourceSpec("whatsapp_role", "iam", True, "Role IAM de privilégio mínimo do webhook WhatsApp"),
+    ResourceSpec("whatsapp_secret", "secretsmanager", True, "Token da Graph API da Meta (diagnóstico manual)"),
+    ResourceSpec("whatsapp_role", "iam", True, "Role IAM de privilégio mínimo das Lambdas do WhatsApp"),
     ResourceSpec("agentcore_ecr", "ecr", True, "Repositório ECR da imagem do Agente_IA (AgentCore Runtime)"),
     ResourceSpec("agentcore_role", "iam", True, "Role de execução do Bedrock AgentCore Runtime"),
     ResourceSpec("secrets", "secretsmanager", True, "Segredos/credenciais (Secrets Manager)"),
@@ -144,6 +140,10 @@ REQUIRED_RESOURCE_SPECS: tuple[ResourceSpec, ...] = (
     ResourceSpec("api_role", "iam", True, "Role IAM de privilégio mínimo da API_de_Integracao"),
     ResourceSpec("ingestor_role", "iam", True, "Role IAM de privilégio mínimo do Ingestor"),
     ResourceSpec("monitor_role", "iam", True, "Role IAM de privilégio mínimo do Monitor_de_Consumo"),
+    ResourceSpec("custos_table", "dynamodb", True, "Tabela do controle de custos (aba Custos)"),
+    ResourceSpec("custos_role", "iam", True, "Role das Lambdas do controle de custos"),
+    ResourceSpec("custos_logs_lambda", "lambda", True, "Custo em tempo real a partir dos logs"),
+    ResourceSpec("custos_coleta_lambda", "lambda", True, "Coleta horária de custos (métricas e fatura)"),
 )
 
 
@@ -362,6 +362,8 @@ class ArnContext:
     staging_bucket: str = "progep-ifs-staging"
     painel_bucket: str = "progep-ifs-painel"
     session_table: str = "progep-ifs-sessions"
+    #: Tabela do controle de custos (aba "Custos" do painel).
+    custos_table: str = "progep-ifs-custos"
     knowledge_base_id: str = "*"
     #: LLM used by the Agente_IA (chamadas anotadas com o User_Agent_APN).
     model_id: str = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -371,8 +373,6 @@ class ArnContext:
     vector_bucket: str = "progep-ifs-vectors"
     vector_index: str = "progep-ifs-index"
     secret_name: str = "progep-ifs/*"
-    #: Segredo dedicado do webhook WhatsApp Cloud API (verify/access token).
-    whatsapp_secret_name: str = "progep-ifs/whatsapp*"
     #: ARN do AgentCore Runtime que os handlers invocam (arquitetura única).
     #: Default escopado por nome (passa Property 21); o ARN concreto é injetado
     #: no deploy via configuração do Pulumi.
@@ -430,10 +430,6 @@ def _secret_arn(ctx: ArnContext) -> str:
     return f"arn:{ctx.partition}:secretsmanager:{ctx.region}:{ctx.account_id}:secret:{ctx.secret_name}"
 
 
-def _whatsapp_secret_arn(ctx: ArnContext) -> str:
-    return f"arn:{ctx.partition}:secretsmanager:{ctx.region}:{ctx.account_id}:secret:{ctx.whatsapp_secret_name}"
-
-
 def _log_group_arn(ctx: ArnContext) -> str:
     return f"arn:{ctx.partition}:logs:{ctx.region}:{ctx.account_id}:log-group:{ctx.log_group}:*"
 
@@ -443,10 +439,6 @@ def _lambda_log_group_arn(ctx: ArnContext) -> str:
         f"arn:{ctx.partition}:logs:{ctx.region}:{ctx.account_id}:"
         f"log-group:{ctx.lambda_log_group}:*"
     )
-
-
-def _function_arn(ctx: ArnContext) -> str:
-    return f"arn:{ctx.partition}:lambda:{ctx.region}:{ctx.account_id}:function:{ctx.agent_function}"
 
 
 def _connect_instance_arn(ctx: ArnContext) -> str:
@@ -599,16 +591,12 @@ def build_component_policies(ctx: ArnContext | None = None) -> dict[str, IamPoli
         ]
     )
 
-    # Webhook WhatsApp Cloud API (canal de teste): invoca o runtime e lê o
-    # segredo do WhatsApp (verify/access token).
+    # Lambdas do WhatsApp (entrada pelo End User Messaging, encerramento e chat
+    # do Connect). A role ainda se chama `progep-ifs-whatsapp-webhook`, do
+    # webhook que veio antes; renomeá-la recriaria a role e as três Lambdas.
     whatsapp = build_policy(
         [
             invoke_runtime_stmt,
-            build_statement(
-                ["secretsmanager:GetSecretValue"],
-                _whatsapp_secret_arn(c),
-                sid="ReadWhatsAppSecret",
-            ),
             # Ciclo de vida da conversa: saudação na abertura, registro da
             # atividade e varredura das paradas para o encerramento. ``Scan``
             # é da varredura — a tabela guarda uma linha por conversa ativa.
@@ -634,9 +622,8 @@ def build_component_policies(ctx: ArnContext | None = None) -> dict[str, IamPoli
                 sid="EspelharChatDoAtendimento",
             ),
             # Envio pelo End User Messaging Social: resposta, "digitando" e
-            # encerramento saem por aqui depois da migração do webhook (§6.4 da
-            # documentação). Escopado a números de telefone vinculados, não à
-            # WABA — enviar é ação do número.
+            # encerramento saem por aqui (§6.4 da documentação). Escopado a
+            # números de telefone vinculados, não à WABA — enviar é ação do número.
             build_statement(
                 ["social-messaging:SendWhatsAppMessage"],
                 f"arn:{c.partition}:social-messaging:{c.region}:{c.account_id}"
@@ -685,6 +672,12 @@ def build_component_policies(ctx: ArnContext | None = None) -> dict[str, IamPoli
                 _kb_arn(c),
                 sid="AcervoNaBaseDeConhecimento",
             ),
+            # Aba "Custos": só leitura da tabela que as Lambdas de custos gravam.
+            build_statement(
+                ["dynamodb:Query", "dynamodb:GetItem"],
+                f"arn:{c.partition}:dynamodb:{c.region}:{c.account_id}:table/{c.custos_table}",
+                sid="LerCustos",
+            ),
             log_stmt,
         ]
     )
@@ -722,6 +715,85 @@ AGENTCORE_WILDCARD_ACTION_EXCEPTIONS: tuple[str, ...] = (
     "xray:GetSamplingRules",
     "xray:GetSamplingTargets",
 )
+
+#: Ciclo de vida do repositório da imagem do agente: só imagens **sem tag** e
+#: com mais de 7 dias (as versões anteriores ao `latest`), o que deixa uma
+#: semana de versões para voltar atrás.
+ECR_LIFECYCLE_POLICY: dict = {
+    "rules": [
+        {
+            "rulePriority": 1,
+            "description": "Expira versões antigas (sem tag) com mais de 7 dias",
+            "selection": {
+                "tagStatus": "untagged",
+                "countType": "sinceImagePushed",
+                "countUnit": "days",
+                "countNumber": 7,
+            },
+            "action": {"type": "expire"},
+        }
+    ]
+}
+
+#: Leituras do controle de custos que a AWS só aceita com ``Resource: "*"``:
+#: métricas do CloudWatch não têm ARN, e o Cost Explorer não tem tipo de recurso
+#: para ``GetCostAndUsage``. As três são **somente leitura**.
+CUSTOS_WILDCARD_ACTION_EXCEPTIONS: tuple[str, ...] = (
+    "cloudwatch:GetMetricData",
+    "cloudwatch:ListMetrics",
+    "ce:GetCostAndUsage",
+)
+
+
+def _custos_table_arn(ctx: ArnContext) -> str:
+    return f"arn:{ctx.partition}:dynamodb:{ctx.region}:{ctx.account_id}:table/{ctx.custos_table}"
+
+
+def custos_policy_document(ctx: ArnContext, *, ecr_repository_arn: str) -> dict:
+    """Role das duas Lambdas do controle de custos.
+
+    Escreve só na própria tabela; o resto é leitura, escopada ao que é da
+    PROGEP sempre que a AWS permite (as funções ``progep-ifs-*``, o repositório
+    da imagem, o índice de vetores). As exceções com ``"*"`` estão em
+    :data:`CUSTOS_WILDCARD_ACTION_EXCEPTIONS`.
+    """
+    c = ctx
+    escopadas = build_policy([
+        build_statement(
+            ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+            _custos_table_arn(c),
+            sid="TabelaDeCustos",
+        ),
+        build_statement(
+            ["lambda:GetFunctionConfiguration"],
+            f"arn:{c.partition}:lambda:{c.region}:{c.account_id}:function:progep-ifs-*",
+            sid="MemoriaDasLambdas",
+        ),
+        build_statement(
+            ["logs:DescribeLogGroups"],
+            f"arn:{c.partition}:logs:{c.region}:{c.account_id}:log-group:*",
+            sid="TamanhoDosLogs",
+        ),
+        build_statement(["ecr:DescribeImages"], ecr_repository_arn, sid="TamanhoDaImagem"),
+        build_statement(
+            ["s3vectors:ListVectors"],
+            [_vector_bucket_arn(c), _vector_index_arn(c)],
+            sid="TamanhoDoIndice",
+        ),
+        build_statement(
+            ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            _lambda_log_group_arn(c),
+            sid="CloudWatchLogs",
+        ),
+    ])
+    documento = to_policy_document(escopadas)
+    documento["Statement"].append({
+        "Sid": "LeiturasSemRecurso",
+        "Effect": "Allow",
+        "Action": list(CUSTOS_WILDCARD_ACTION_EXCEPTIONS),
+        "Resource": "*",
+    })
+    return documento
 
 
 def agentcore_execution_policy_document(
@@ -902,6 +974,9 @@ def define_resources(
     region: str = "us-east-1",
     agent_runtime_arn: str | None = None,
     cors_allow_origin: str = "*",
+    custos_equipe_tecnica: str = "",
+    custos_meta_isento: str = "false",
+    trilha_propria: bool = False,
 ) -> SolutionResources:
     """Declare all AWS resources of the solution via the shared provider.
 
@@ -1387,6 +1462,8 @@ def define_resources(
                 "KNOWLEDGE_BASE_ID": r["knowledge_base"].id,
                 "DATA_SOURCE_ID": r["kb_data_source"].data_source_id,
                 "CORS_ALLOW_ORIGIN": cors_allow_origin,
+                "CUSTOS_TABLE": c.custos_table,
+                "CUSTOS_META_ISENTO": custos_meta_isento,
             }
         ),
         opts=opts,
@@ -1492,66 +1569,14 @@ def define_resources(
         opts=opts,
     )
 
-    # Lambda dedicada ao contact flow: cada função tem um único handler, e o
-    # contrato do Connect (resposta plana de strings) difere do da API.
-    r["connect_lambda"] = aws.lambda_.Function(
-        f"{name_prefix}-connect",
-        name=f"{name_prefix}-connect",
-        role=r["api_role"].arn,
-        runtime="python3.12",
-        handler="src.adapters.lambda_entry.connect_handler",
-        code=lambda_code,
-        timeout=15,  # o bloco do Connect espera no máximo 8s; margem para o cold start
-        memory_size=512,
-        environment=aws.lambda_.FunctionEnvironmentArgs(
-            variables={"AGENT_RUNTIME_ARN": c.agent_runtime_arn}
-        ),
-        opts=opts,
-    )
-    # Permite que o Connect invoque a Lambda do agente a partir do contact flow.
-    connect_invoke_perm = aws.lambda_.Permission(
-        f"{name_prefix}-connect-lambda-perm",
-        action="lambda:InvokeFunction",
-        function=r["connect_lambda"].name,
-        principal="connect.amazonaws.com",
-        source_arn=r["connect_instance"].arn,
-        opts=opts,
-    )
-    connect_lambda_assoc = aws.connect.LambdaFunctionAssociation(
-        f"{name_prefix}-connect-lambda-assoc",
-        instance_id=r["connect_instance"].id,
-        function_arn=r["connect_lambda"].arn,
-        opts=pulumi.ResourceOptions(provider=prov, depends_on=[connect_invoke_perm]),
-    )
-    r["connect_flow"] = aws.connect.ContactFlow(
-        f"{name_prefix}-connect-flow",
-        instance_id=r["connect_instance"].id,
-        name=f"{name_prefix}-assistente-progep",
-        description="Atendimento do assistente PROGEP com escalonamento humano",
-        type="CONTACT_FLOW",
-        content=pulumi.Output.all(
-            r["connect_lambda"].arn, r["connect_queue"].arn
-        ).apply(
-            lambda args: contact_flow_content(lambda_arn=args[0], queue_arn=args[1])
-        ),
-        opts=pulumi.ResourceOptions(
-            provider=prov, depends_on=[connect_lambda_assoc]
-        ),
-    )
-    for rid, reason in (
-        (f"{name_prefix}-connect-lambda-perm", "aws.lambda.Permission não suporta tags"),
-        (f"{name_prefix}-connect-lambda-assoc",
-         "aws.connect.LambdaFunctionAssociation não suporta tags"),
-    ):
-        out.tagging_exceptions.register(rid, reason)
-
     # -- Transbordo humano do WhatsApp (§6.5 da documentação) --------------------
     #
     #   servidor → Lambda do WhatsApp ─ StartChatContact/SendMessage → Connect
     #   atendente → Connect ─ streaming → SNS → Lambda → SendWhatsAppMessage
     #
-    # Fluxo próprio: o `assistente-progep` acima chama o assistente, e quem pediu
-    # uma pessoa não pode receber "Faça sua pergunta" de novo.
+    # O fluxo só enfileira: quem pediu uma pessoa já conversou com o assistente.
+    # (Até 02/10/2026 havia também o `assistente-progep`, um fluxo que chamava o
+    # assistente a cada mensagem pelo Connect, do desenho original; nada o usava.)
     r["connect_transfer_flow"] = aws.connect.ContactFlow(
         f"{name_prefix}-connect-transbordo-flow",
         instance_id=r["connect_instance"].id,
@@ -1609,48 +1634,17 @@ def define_resources(
         f"{name_prefix}-connect-chat-stream-policy", "aws.sns.TopicPolicy não suporta tags"
     )
 
-    # -- WhatsApp webhook (Meta Cloud API) — canal interino de teste -------------
-    # Segredo com verify_token/access_token/app_secret do app da Meta. Criado
-    # vazio; preenchido após o setup do número de teste na Meta (Req 10.1).
+    # -- Segredo da Meta -----------------------------------------------------------
+    # Token de System User da Graph API, usado só no diagnóstico manual (§7.6 da
+    # documentação: nome de exibição, saúde do número). Nenhuma Lambda o lê desde
+    # que o webhook do número de teste saiu (02/10/2026): o envio e o
+    # recebimento passam pelo End User Messaging, que tem credencial própria.
     r["whatsapp_secret"] = aws.secretsmanager.Secret(
         f"{name_prefix}-whatsapp-secret",
         name="progep-ifs/whatsapp",
         description="Meta WhatsApp Cloud API: verify_token, access_token, app_secret",
         opts=opts,
     )
-    r["whatsapp_webhook_lambda"] = aws.lambda_.Function(
-        f"{name_prefix}-whatsapp-webhook",
-        name=f"{name_prefix}-whatsapp-webhook",
-        role=r["whatsapp_role"].arn,
-        runtime="python3.12",
-        handler="src.adapters.lambda_entry.whatsapp_handler",
-        code=lambda_code,
-        timeout=35,
-        memory_size=512,
-        environment=aws.lambda_.FunctionEnvironmentArgs(
-            variables={
-                # Arquitetura única: o webhook invoca o AgentCore Runtime.
-                "AGENT_RUNTIME_ARN": c.agent_runtime_arn,
-                "WHATSAPP_SECRET_NAME": r["whatsapp_secret"].name,
-                # Ciclo de vida da conversa: saudação na abertura e registro da
-                # última atividade, que alimenta o encerramento por inatividade.
-                "SESSIONS_TABLE": c.session_table,
-                **transbordo_env,
-            }
-        ),
-        opts=opts,
-    )
-    # Function URL pública (AuthType=NONE): a Meta chama o webhook diretamente. O
-    # acesso é protegido pelo verify_token (GET) e pela assinatura HMAC (POST).
-    whatsapp_url = aws.lambda_.FunctionUrl(
-        f"{name_prefix}-whatsapp-url",
-        function_name=r["whatsapp_webhook_lambda"].name,
-        authorization_type="NONE",
-        opts=opts,
-    )
-    # URL exposta para configurar o webhook no painel da Meta (não é recurso
-    # requerido do catálogo; guardada para export).
-    r["whatsapp_function_url"] = whatsapp_url
 
     # -- Encerramento de conversa por inatividade --------------------------------
     # O TTL do DynamoDB não serve aqui: ele apaga o item em até 48 h depois de
@@ -1667,7 +1661,6 @@ def define_resources(
         memory_size=256,
         environment=aws.lambda_.FunctionEnvironmentArgs(
             variables={
-                "WHATSAPP_SECRET_NAME": r["whatsapp_secret"].name,
                 "SESSIONS_TABLE": c.session_table,
             }
         ),
@@ -1698,19 +1691,13 @@ def define_resources(
         f"{name_prefix}-whatsapp-encerramento-target",
         "aws.cloudwatch.EventTarget não suporta tags",
     )
-    out.tagging_exceptions.register(
-        f"{name_prefix}-whatsapp-url", "aws.lambda.FunctionUrl não suporta tags"
-    )
 
     # -- WhatsApp pelo End User Messaging Social (§6.4 da documentação) ----------
     #
     #   Meta → End User Messaging → SNS → Lambda → SendWhatsAppMessage
     #
-    # Tudo aqui fica **inerte** até a WABA ser vinculada no console e este tópico
-    # ser escolhido como destino de eventos dela. Até lá o webhook interino acima
-    # continua atendendo — as duas entradas podem coexistir sem conflito.
-    #
-    # Tópico **padrão**: o End User Messaging não publica em FIFO.
+    # A WABA vinculada no console aponta para este tópico como destino de
+    # eventos. Tópico **padrão**: o End User Messaging não publica em FIFO.
     r["whatsapp_inbound_topic"] = aws.sns.Topic(
         f"{name_prefix}-whatsapp-inbound",
         name=f"{name_prefix}-whatsapp-inbound",
@@ -1754,8 +1741,8 @@ def define_resources(
         runtime="python3.12",
         handler="src.adapters.lambda_entry.whatsapp_social_handler",
         code=lambda_code,
-        # Agente (~7 s, até ~9 s em follow-up) + saudação + resposta. O webhook
-        # usa 35 s porque a Meta corta a requisição; aqui ninguém espera.
+        # Agente (~7 s, até ~9 s em follow-up) + saudação + resposta; entrada
+        # assíncrona pelo SNS, então ninguém espera a Lambda terminar.
         timeout=60,
         memory_size=512,
         environment=aws.lambda_.FunctionEnvironmentArgs(
@@ -1803,8 +1790,7 @@ def define_resources(
 
     # Volta do transbordo: fala do atendente, entrada dele e fim do atendimento.
     # Mesma role do WhatsApp — precisa exatamente do que ela já tem: ler a
-    # conversa, enviar pelo End User Messaging e, para conversas que começaram
-    # pelo webhook interino, o segredo da Meta.
+    # conversa e enviar pelo End User Messaging.
     r["connect_chat_stream_lambda"] = aws.lambda_.Function(
         f"{name_prefix}-connect-chat-stream",
         name=f"{name_prefix}-connect-chat-stream",
@@ -1817,7 +1803,6 @@ def define_resources(
         environment=aws.lambda_.FunctionEnvironmentArgs(
             variables={
                 "SESSIONS_TABLE": c.session_table,
-                "WHATSAPP_SECRET_NAME": r["whatsapp_secret"].name,
             }
         ),
         opts=opts,
@@ -1865,6 +1850,21 @@ def define_resources(
         ),
         force_delete=True,
         opts=opts,
+    )
+    # Cada deploy empurra um `latest` novo e a versão anterior fica sem tag —
+    # eram 55 imagens (2,9 GB, ~US$ 0,29/mês) em 02/10/2026. Expira o que está
+    # sem tag há mais de 7 dias. A imagem em uso não corre risco: ela tem a tag
+    # `latest`, e o ECR não expira manifest filho de um índice que ainda existe
+    # ("If an image is referenced by a manifest list, it cannot be expired ...
+    # without the manifest list being deleted first" — guia do ECR).
+    aws.ecr.LifecyclePolicy(
+        f"{name_prefix}-agentcore-lifecycle",
+        repository=r["agentcore_ecr"].name,
+        policy=json.dumps(ECR_LIFECYCLE_POLICY),
+        opts=opts,
+    )
+    out.tagging_exceptions.register(
+        f"{name_prefix}-agentcore-lifecycle", "aws.ecr.LifecyclePolicy não suporta tags"
     )
     agentcore_role = aws.iam.Role(
         f"{name_prefix}-agentcore-exec",
@@ -2245,6 +2245,11 @@ def define_resources(
         opts=opts,
     )
 
+    _definir_controle_de_custos(
+        out, c, prov=prov, opts=opts, name_prefix=name_prefix, lambda_code=lambda_code,
+        equipe_tecnica=custos_equipe_tecnica, meta_isento=custos_meta_isento,
+    )
+
     # -- CloudTrail --------------------------------------------------------------
     trail_bucket = aws.s3.BucketV2(
         f"{name_prefix}-trail-bucket",
@@ -2309,17 +2314,185 @@ def define_resources(
         f"{name_prefix}-trail-bucket-policy",
         "aws.s3.BucketPolicy não suporta tags",
     )
+    # A conta já é coberta pela trilha da organização (`dnx`, multirregião, que
+    # é a cópia gratuita dos eventos de gestão). Esta, como segunda cópia, é
+    # cobrada: US$ 4,30 em setembro/2026, dois terços do custo do projeto. Fica
+    # criada e desligada; religar é `pulumi config set progep-ifs:trilhaPropria
+    # true` — necessário se a conta sair da organização da DNX, que leva a
+    # trilha dela junto. Os logs já gravados no bucket continuam lá.
     r["audit_trail"] = aws.cloudtrail.Trail(
         trail_name,
         name=trail_name,
         s3_bucket_name=trail_bucket.id,
         include_global_service_events=True,
         is_multi_region_trail=False,
-        enable_logging=True,
+        enable_logging=trilha_propria,
         opts=pulumi.ResourceOptions(provider=prov, depends_on=[trail_bucket_policy]),
     )
 
     return out
+
+
+#: Log groups assinados pelo controle de custos e o filtro de cada um. O de
+#: invocações vai sem filtro: a atribuição (PROGEP x outros projetos) depende da
+#: identidade dentro do JSON, e é feita no código (`custos.item_da_invocacao`).
+CUSTOS_ASSINATURAS: tuple[tuple[str, str, str], ...] = (
+    ("invocacoes", "/progep-ifs/bedrock/model-invocations", ""),
+    ("whatsapp", "/aws/lambda/progep-ifs-whatsapp-social",
+     '?"[entrada] msg=" ?"[entrega]" ?"[chat] mensagem"'),
+    ("chat", "/aws/lambda/progep-ifs-connect-chat-stream", '"[chat] mensagem"'),
+)
+
+
+def _definir_controle_de_custos(
+    out: SolutionResources,
+    c: ArnContext,
+    *,
+    prov: Any,
+    opts: Any,
+    name_prefix: str,
+    lambda_code: Any,
+    equipe_tecnica: str,
+    meta_isento: str,
+) -> None:
+    """Aba "Custos" do painel: tabela, coleta em tempo real e coleta horária."""
+    r = out.resources
+    r["custos_table"] = aws.dynamodb.Table(
+        f"{name_prefix}-custos",
+        name=c.custos_table,
+        billing_mode="PAY_PER_REQUEST",
+        hash_key="pk",
+        range_key="sk",
+        attributes=[
+            aws.dynamodb.TableAttributeArgs(name="pk", type="S"),
+            aws.dynamodb.TableAttributeArgs(name="sk", type="S"),
+        ],
+        # Só as marcas de evento vencem; os custos ficam (histórico do painel).
+        ttl=aws.dynamodb.TableTtlArgs(attribute_name="expira_em", enabled=True),
+        opts=opts,
+    )
+
+    role = aws.iam.Role(
+        f"{name_prefix}-custos",
+        name=f"{name_prefix}-custos",
+        assume_role_policy=pulumi.Output.json_dumps(LAMBDA_ASSUME_ROLE_POLICY),
+        opts=opts,
+    )
+    r["custos_role"] = role
+    aws.iam.RolePolicy(
+        f"{name_prefix}-custos-policy",
+        role=role.id,
+        policy=pulumi.Output.all(
+            r["agentcore_ecr"].arn,
+            aws.get_caller_identity_output(opts=pulumi.InvokeOptions(provider=prov)).account_id,
+        ).apply(
+            lambda args: pulumi.Output.json_dumps(
+                custos_policy_document(replace(c, account_id=args[1]),
+                                       ecr_repository_arn=args[0])
+            )
+        ),
+        opts=opts,
+    )
+
+    ambiente = {
+        "CUSTOS_TABLE": c.custos_table,
+        "CUSTOS_EQUIPE_TECNICA": equipe_tecnica,
+        "CUSTOS_META_ISENTO": meta_isento,
+    }
+    r["custos_logs_lambda"] = aws.lambda_.Function(
+        f"{name_prefix}-custos-logs",
+        name=f"{name_prefix}-custos-logs",
+        role=role.arn,
+        runtime="python3.12",
+        handler="src.adapters.custos_handler.logs_handler",
+        code=lambda_code,
+        timeout=60,
+        memory_size=256,
+        environment=aws.lambda_.FunctionEnvironmentArgs(variables=ambiente),
+        opts=opts,
+    )
+    runtime_arn = c.agent_runtime_arn if "*" not in c.agent_runtime_arn else ""
+    r["custos_coleta_lambda"] = aws.lambda_.Function(
+        f"{name_prefix}-custos-coleta",
+        name=f"{name_prefix}-custos-coleta",
+        role=role.arn,
+        runtime="python3.12",
+        handler="src.adapters.custos_handler.coleta_handler",
+        code=lambda_code,
+        timeout=180,
+        memory_size=256,
+        environment=aws.lambda_.FunctionEnvironmentArgs(variables={
+            **ambiente,
+            "AGENT_RUNTIME_ARN": runtime_arn,
+            "CUSTOS_ECR_REPO": r["agentcore_ecr"].name,
+            "CUSTOS_VECTOR_BUCKET": c.vector_bucket,
+            "CUSTOS_VECTOR_INDEX": c.vector_index,
+            # progep-ifs/whatsapp e o segredo genérico do projeto.
+            "CUSTOS_SEGREDOS": "2",
+        }),
+        opts=opts,
+    )
+
+    regra = aws.cloudwatch.EventRule(
+        f"{name_prefix}-custos-coleta-rule",
+        name=f"{name_prefix}-custos-coleta",
+        description="Coleta horária do controle de custos (métricas, fixos e fatura)",
+        schedule_expression="rate(1 hour)",
+        opts=opts,
+    )
+    aws.cloudwatch.EventTarget(
+        f"{name_prefix}-custos-coleta-target",
+        rule=regra.name,
+        arn=r["custos_coleta_lambda"].arn,
+        opts=opts,
+    )
+    aws.lambda_.Permission(
+        f"{name_prefix}-custos-coleta-perm",
+        action="lambda:InvokeFunction",
+        function=r["custos_coleta_lambda"].name,
+        principal="events.amazonaws.com",
+        source_arn=regra.arn,
+        opts=opts,
+    )
+    sem_tags = [
+        (f"{name_prefix}-custos-policy", "aws.iam.RolePolicy (inline) não suporta tags"),
+        (f"{name_prefix}-custos-coleta-target", "aws.cloudwatch.EventTarget não suporta tags"),
+        (f"{name_prefix}-custos-coleta-perm", "aws.lambda.Permission não suporta tags"),
+    ]
+
+    for chave, grupo, filtro in CUSTOS_ASSINATURAS:
+        permissao = aws.lambda_.Permission(
+            f"{name_prefix}-custos-logs-perm-{chave}",
+            action="lambda:InvokeFunction",
+            function=r["custos_logs_lambda"].name,
+            principal="logs.amazonaws.com",
+            source_arn=f"arn:{c.partition}:logs:{c.region}:{c.account_id}:log-group:{grupo}:*"
+            if c.account_id != "*"
+            else aws.get_caller_identity_output(
+                opts=pulumi.InvokeOptions(provider=prov)
+            ).account_id.apply(
+                lambda conta, g=grupo: f"arn:{c.partition}:logs:{c.region}:{conta}:log-group:{g}:*"
+            ),
+            opts=opts,
+        )
+        depende = [permissao]
+        if chave == "invocacoes":
+            depende.append(r["bedrock_invocation_logs"])
+        aws.cloudwatch.LogSubscriptionFilter(
+            f"{name_prefix}-custos-sub-{chave}",
+            name=f"{name_prefix}-custos",
+            log_group=grupo,
+            filter_pattern=filtro,
+            destination_arn=r["custos_logs_lambda"].arn,
+            opts=pulumi.ResourceOptions(provider=prov, depends_on=depende),
+        )
+        sem_tags += [
+            (f"{name_prefix}-custos-logs-perm-{chave}", "aws.lambda.Permission não suporta tags"),
+            (f"{name_prefix}-custos-sub-{chave}",
+             "aws.cloudwatch.LogSubscriptionFilter não suporta tags"),
+        ]
+    for rid, motivo in sem_tags:
+        out.tagging_exceptions.register(rid, motivo)
 
 
 def _register_unsupported_service(

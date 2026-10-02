@@ -20,7 +20,6 @@ justamente a limpeza de "documento antigo".
 from __future__ import annotations
 
 import posixpath
-import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -239,8 +238,3 @@ def validar_chave_do_acervo(chave: str) -> str:
     if chave.endswith("/"):
         raise PedidoInvalido("Caminho de documento inválido.")
     return chave
-
-
-def rotulo_de_upload(nome: str) -> str:
-    """Nome exibido na lista de preparo, sem a numeração de ordenação."""
-    return re.sub(r"^\d{1,2}[_-]", "", nome)

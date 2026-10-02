@@ -98,6 +98,8 @@ de encerramento. Uma nova mensagem depois disso começa uma conversa nova.
 - Os registros técnicos de uso do modelo, acessíveis apenas à equipe técnica,
   contêm o texto das buscas feitas a partir das perguntas. Eles servem para
   acompanhar custos e investigar respostas incorretas.
+- Todos os registros técnicos são apagados automaticamente depois de 90 dias. O
+  telefone de quem conversou aparece neles só com os 4 últimos dígitos.
 
 ---
 
@@ -140,6 +142,12 @@ pessoas autorizadas pela PROGEP podem alterar a base.
   recuperado pela DNX em até 30 dias.
 - **Conferir a base.** Uma verificação mostra documentos que estão no acervo
   mas não puderam ser lidos pelo assistente.
+- **Acompanhar os custos** (aba "Custos"). Mostra o gasto de hoje, dos últimos
+  7 e 30 dias e do mês, com projeção para o fechamento do mês, custo por
+  pergunta e quanto da cota grátis de mensagens da Meta já foi usado. O valor
+  é **medido a partir do uso real**, não estimado, e aparece poucos minutos
+  depois de cada pergunta. Conta **só o assistente da PROGEP**: a conta da AWS
+  do IFS também tem outros projetos, que ficam de fora.
 
 ### Boas práticas
 
@@ -162,6 +170,10 @@ fatura: nesta conta, cerca de 13%.
 Os custos se dividem em duas partes: uma **fixa**, que existe mesmo sem uso, e
 uma **por uso**, proporcional à quantidade de perguntas.
 
+Os valores reais, dia a dia, ficam na aba **"Custos" do painel do acervo**
+(seção 4). As tabelas abaixo servem para planejar volumes que ainda não
+aconteceram.
+
 ### Custo por pergunta
 
 Medido em setembro de 2026, com 78 perguntas reais ao assistente.
@@ -174,18 +186,21 @@ Medido em setembro de 2026, com 78 perguntas reais ao assistente.
 | Busca nos documentos | menos de US$ 0,001 |
 | **Total por pergunta** | **US$ 0,03 a 0,05** |
 
-A tarifa da Meta **não se aplica** às respostas do assistente: mensagens
-enviadas em resposta ao servidor, dentro de 24 horas da mensagem dele, são
-gratuitas no WhatsApp. A Meta só cobraria se a instituição iniciasse conversas
-(por exemplo, avisos em massa), o que o projeto não faz hoje.
+**Tarifa da Meta (desde 01/10/2026).** Cada número tem **1.000 mensagens de
+resposta grátis por mês**. A partir da 1.001ª, a Meta cobra cerca de
+**US$ 0,0068 por mensagem** entregue. Com 1,5 a 2 mensagens enviadas por
+pergunta, a cota cobre de 500 a 650 perguntas por mês. Acima disso, o custo
+por pergunta sobe cerca de US$ 0,01. A Meta indica que órgãos públicos
+elegíveis podem continuar isentos; a elegibilidade do IFS ainda precisa ser
+confirmada com a Meta.
 
 ### Estimativa mensal por volume de uso
 
-| Perguntas por mês | Custo de uso estimado |
-|---|---|
-| 1.000 | US$ 30 a 50 |
-| 5.000 | US$ 150 a 250 |
-| 10.000 | US$ 300 a 500 |
+| Perguntas por mês | Custo de uso estimado | Tarifa da Meta (sem isenção) |
+|---|---|---|
+| 1.000 | US$ 30 a 50 | + US$ 3 a 7 |
+| 5.000 | US$ 150 a 250 | + US$ 45 a 60 |
+| 10.000 | US$ 300 a 500 | + US$ 95 a 130 |
 
 ### Atendimento humano
 
@@ -197,17 +212,20 @@ atendimento, além da tarifa normal do WhatsApp. Um atendimento típico, de 10 a
 
 | Item | Custo por mês |
 |---|---|
-| Registro de auditoria (CloudTrail) | cerca de US$ 4,30 |
 | Guarda segura de credenciais (Secrets Manager) | US$ 0,80 |
-| Monitoramento (CloudWatch) | cerca de US$ 1 |
-| Armazenamento da imagem do assistente | US$ 0,13 |
-| Documentos, índice de busca, banco de conversas, automações, painel e API | centavos; no volume atual, dentro das faixas gratuitas da AWS |
-| **Total fixo** | **cerca de US$ 6 a 7** |
+| Monitoramento (CloudWatch) | US$ 0,20 a 1 |
+| Armazenamento (documentos, índice de busca e imagem do assistente) | menos de US$ 0,10 |
+| Registro de auditoria (CloudTrail) | sem custo (ver abaixo) |
+| Banco de conversas, automações, painel e API | centavos |
+| **Total fixo** | **cerca de US$ 1 a 2** |
 
-**Oportunidade de economia:** a conta do IFS já possui um registro de
-auditoria geral, mantido pela organização. O registro criado pelo projeto
-duplica esse trabalho, e a AWS cobra a segunda cópia. Ajustá-lo reduz o custo
-fixo para cerca de US$ 2 a 3 por mês, sem perda de auditoria.
+**Economia aplicada em 02/10/2026.** O custo fixo era de US$ 6 a 7 por mês. A
+maior parte vinha do registro de auditoria do projeto, que duplicava o
+registro geral que a organização já mantém para a conta; a AWS cobra a
+segunda cópia, e ela foi desligada sem perda de auditoria. As versões antigas
+da imagem do assistente passaram a ser apagadas depois de 7 dias. Se a conta
+do IFS deixar a organização da DNX, o registro próprio deve ser religado
+(é uma configuração, já preparada).
 
 ### Base de conhecimento
 
@@ -241,13 +259,14 @@ transcrição de material em imagem tem custo perceptível, e ela é feita uma
 
 | Cenário | Custo mensal aproximado |
 |---|---|
-| Fase de testes (setembro/2026, 78 perguntas) | cerca de US$ 10 |
-| 1.000 perguntas por mês | US$ 40 a 60 |
-| 5.000 perguntas por mês | US$ 160 a 260 |
+| Fase de testes (setembro/2026, 98 perguntas), medido | US$ 8,17 |
+| 1.000 perguntas por mês | US$ 30 a 55 |
+| 5.000 perguntas por mês | US$ 150 a 255 |
 
-A conta AWS é compartilhada com outros projetos do IFS. Os valores acima
-consideram apenas o que é do assistente da PROGEP, identificado item a item na
-fatura.
+Os cenários de volume não incluem a tarifa da Meta acima da cota grátis (ver
+"Tarifa da Meta"). A conta AWS é compartilhada com outros projetos do IFS; os
+valores acima consideram apenas o que é do assistente da PROGEP, medido pelos
+recursos do próprio assistente.
 
 ---
 

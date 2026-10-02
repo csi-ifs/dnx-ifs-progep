@@ -1,12 +1,12 @@
 """Canal WhatsApp pelo AWS End User Messaging Social (Req 6.1, 6.2).
 
-Substitui o caminho interino que fala direto com a Graph API da Meta. A
-diferença de fora para dentro:
+```
+Meta → End User Messaging → SNS → Lambda → SendWhatsAppMessage → Meta
+```
 
-```
-antes:  Meta → webhook (Function URL) → Lambda → Graph API → Meta
-agora:  Meta → End User Messaging → SNS → Lambda → SendWhatsAppMessage → Meta
-```
+(Até 02/10/2026 existiu também um webhook do número de teste, que falava direto
+com a Graph API por uma Function URL; saiu por estar sem uso e aceitar POST sem
+assinatura.)
 
 **O corpo da mensagem não muda.** ``SendWhatsAppMessage`` recebe o payload como
 *blob* — é o mesmo JSON que se manda à Graph API, apenas embrulhado. Por isso o
@@ -26,8 +26,8 @@ evento Lambda → Records[].Sns.Message   (string JSON)
                        └→ {"id", "changes": [{"value", "field"}]}
 ```
 
-O miolo é o **mesmo ``entry`` da Meta** que :func:`parse_inbound_messages` já
-percorre — daí ele ser reaproveitado em vez de reescrito.
+O miolo é o **mesmo ``entry`` do webhook da Meta**, percorrido por
+:func:`parse_inbound_messages`.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ import logging
 import os
 from typing import Any, Mapping
 
-from src.adapters.whatsapp_cloud import IncomingWhatsAppMessage, parse_inbound_messages
+from src.adapters.whatsapp_connector import IncomingWhatsAppMessage
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,42 @@ logger = logging.getLogger(__name__)
 #: Fixada para que uma mudança de default do serviço não altere o formato sem
 #: aviso.
 META_API_VERSION = "v20.0"
+
+
+def parse_inbound_messages(body: Mapping[str, Any]) -> list[IncomingWhatsAppMessage]:
+    """Extrai as mensagens de um payload no formato do webhook da Meta.
+
+    Percorre ``entry[].changes[].value.messages[]``; para cada mensagem coleta o
+    remetente, o id, o texto e o ``phone_number_id`` de destino. Mensagens sem
+    corpo de texto entram com ``text=""`` e ``part_types`` refletindo o tipo
+    recebido (ex.: ``("image",)``), de modo que a classificação de conteúdo
+    somente-texto do domínio as descarte (Req 6.3).
+    """
+    out: list[IncomingWhatsAppMessage] = []
+    for entry in body.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            value = change.get("value", {}) or {}
+            metadata = value.get("metadata", {}) or {}
+            phone_number_id = str(metadata.get("phone_number_id", "") or "")
+            for msg in value.get("messages", []) or []:
+                msg_type = str(msg.get("type", "") or "")
+                if msg_type == "text":
+                    text = str((msg.get("text", {}) or {}).get("body", "") or "")
+                    part_types: tuple[str, ...] = ("text",)
+                else:
+                    # Mídia não textual: sem texto, tipo preservado p/ descarte.
+                    text = ""
+                    part_types = (msg_type or "unknown",)
+                out.append(
+                    IncomingWhatsAppMessage(
+                        from_number=str(msg.get("from", "") or ""),
+                        message_id=str(msg.get("id", "") or ""),
+                        text=text,
+                        part_types=part_types,
+                        phone_number_id=phone_number_id,
+                    )
+                )
+    return out
 
 
 def parse_sns_event(evento: Mapping[str, Any]) -> list[IncomingWhatsAppMessage]:
@@ -154,11 +190,9 @@ def phone_number_id_de_origem(evento: Mapping[str, Any]) -> str:
 class WhatsAppSocialClient:
     """Envia mensagens pelo End User Messaging Social.
 
-    Mesma interface do :class:`~src.adapters.whatsapp_cloud.WhatsAppCloudClient`
-    (``send_text`` e ``mark_read_and_typing``, com os mesmos parâmetros) para
-    que a orquestração do canal não precise saber por qual caminho a mensagem
-    sai. O primeiro parâmetro continua se chamando ``phone_number_id``, mas aqui
-    é o identificador **da AWS**.
+    ``send_text`` e ``mark_read_and_typing`` são a interface que a orquestração
+    do canal usa. O primeiro parâmetro se chama ``phone_number_id``, como na
+    Graph API, mas aqui é o identificador **da AWS** (o ARN do número).
     """
 
     def __init__(self, client: Any = None, *, region_name: str | None = None) -> None:

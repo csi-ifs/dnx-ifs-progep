@@ -38,7 +38,7 @@ etapa inventada é pior que uma lacuna assumida, porque ninguém percebe o erro.
 | Transbordo humano (Amazon Connect) | Validado em 22/09/2026; atendentes de teste (§6) |
 | API do site institucional (autenticada via Cognito) | Funcionando; integração aguarda decisão do IFS (§5.4) |
 | WhatsApp de teste +1 555-379-4876 (End User Messaging) | Desenvolvimento; bloqueado pela Meta (erro 131037, §7) |
-| WhatsApp de teste +1 555 176-1308 (webhook interino, Graph API) | Legado — remover (§7.5) |
+| WhatsApp de teste +1 555 176-1308 (webhook interino, Graph API) | Removido em 02/10/2026 (§7.5) |
 
 **Estado atual:** ~420 documentos na base, 738 testes automatizados, resposta
 em ~5–7 s, continuidade de conversa, contatos dos setores quando não há
@@ -177,7 +177,7 @@ No WhatsApp (`lambda_entry.processar_mensagens_whatsapp`), nesta ordem:
 | Amazon S3 | `progep-ifs-documents` | Documentos da base (fonte da KB) |
 | Amazon S3 | `progep-ifs-staging` | Preparo de uploads do painel (`preparo/`) e lixeira (`removidos/`, 30 dias) |
 | Amazon S3 + CloudFront | `progep-ifs-painel` / distribuição `progep-ifs-painel-cf` | Site estático do painel do acervo |
-| AWS Lambda | `-api`, `-acervo`, `-ingestor`, `-whatsapp-social`, `-whatsapp-encerramento`, `-connect-chat-stream`, `-connect`, `-whatsapp-webhook` (legado) | Handlers (§3.4) |
+| AWS Lambda | `-api`, `-acervo`, `-ingestor`, `-whatsapp-social`, `-whatsapp-encerramento`, `-connect-chat-stream`, `-custos-logs`, `-custos-coleta` | Handlers (§3.4) |
 | Amazon SNS | `progep-ifs-whatsapp-inbound`, `progep-ifs-connect-chat-stream` | Entrada do WhatsApp; espelho do chat do Connect |
 | AWS End User Messaging Social | WABA `IFS - PROGEP` (+55 79 3711-1496); WABA `Projeto dev` (teste) | Canal WhatsApp (§7) |
 | Amazon EventBridge | regra `progep-ifs-whatsapp-encerramento` (5 min) | Varredura de inatividade |
@@ -216,6 +216,8 @@ Os que não suportam são registrados no output `tagging_exceptions` do Pulumi.
 | `deploy_agentcore.ps1` | Build, push e atualização do runtime |
 | `publicar_painel.py` | Build do painel do acervo, `config.json` a partir dos outputs do Pulumi, upload e invalidação do CloudFront |
 | `enable_bedrock_logging.ps1` | Liga o model invocation logging |
+| `custos_retroativo.py` | Preenche a aba "Custos" com o uso anterior ao deploy (idempotente; `--simular` só imprime) |
+| `retencao_logs.py` | Aplica 90 dias de retenção aos log groups da PROGEP (os das Lambdas nascem sem prazo); rodar depois de criar Lambda nova |
 
 ### 3.4 Lambdas: para que serve cada uma
 
@@ -227,8 +229,8 @@ Os que não suportam são registrados no output `tagging_exceptions` do Pulumi.
 | `progep-ifs-api` | `lambda_entry.api_handler` | API Gateway `/message` | API do site |
 | `progep-ifs-acervo` | `acervo_handler` | API Gateway `/acervo/*` | Painel do acervo (§8) |
 | `progep-ifs-ingestor` | ingestor | S3 `ObjectCreated` | Dispara a indexação dos documentos novos |
-| `progep-ifs-connect` | `lambda_entry.connect_handler` | contact flow `assistente-progep` | Fluxo antigo (Connect em toda mensagem); sem uso no WhatsApp atual |
-| `progep-ifs-whatsapp-webhook` | `lambda_entry.whatsapp_handler` | Function URL pública | Webhook legado do número de teste; **remover** (§7.5) |
+| `progep-ifs-custos-logs` | `custos_handler.logs_handler` | assinatura de 3 log groups | Custo em tempo real: modelo, WhatsApp, chat do Connect (§8.6) |
+| `progep-ifs-custos-coleta` | `custos_handler.coleta_handler` | EventBridge, 1 h | Custo de métricas (AgentCore, Lambda, DynamoDB…), fixos e fatura (§8.6) |
 
 ---
 
@@ -437,8 +439,6 @@ pulumi config set progep-ifs:corsAllowOrigin https://www.ifs.edu.br
 | Fila humana | `progep-ifs-progep-humano` |
 | Perfil de roteamento | `progep-ifs-atendimento-progep` (canal **CHAT**, 2 simultâneos) |
 | Horário | `progep-ifs-24x7` (enfileira 24×7, Req 3.4) |
-| Contact flow | `progep-ifs-assistente-progep` (ACTIVE) |
-| Lambda do fluxo | `progep-ifs-connect` (`connect_handler`) |
 | Contact flow do transbordo | `progep-ifs-transbordo-whatsapp` (só enfileira) |
 | Tópico do streaming do chat | `progep-ifs-connect-chat-stream` |
 | Lambda do streaming | `progep-ifs-connect-chat-stream` (`connect_chat_stream_handler`) |
@@ -534,10 +534,9 @@ encaminhada ao Agente_IA, e o Amazon Connect é acionado **quando há
 escalonamento** (§6.2). Os demais requisitos do grupo 6 seguem inalterados.
 
 > **Estado do código:** `src/adapters/whatsapp_connector.py` e
-> `src/flows/whatsapp_flow.py` ainda implementam o caminho antigo (Connect em
-> toda mensagem) e **serão reescritos** na implementação desta mudança. O canal
-> em produção hoje é outro — o webhook interino (§3), que não passa pelo
-> Connect em momento nenhum.
+> `src/flows/whatsapp_flow.py` são do desenho original (Connect em toda
+> mensagem) e **não estão em produção**; só os testes da especificação os usam.
+> O canal em produção é `lambda_entry.whatsapp_social_handler`.
 
 **Número de teste da Meta: depende de onde ele foi criado (corrigido em
 14/09/2026).** Alguns números de teste **podem** ser vinculados ao End User
@@ -600,15 +599,12 @@ de assinatura HMAC **deixam de existir**, porque a AWS passa a autenticar.
    produção no número do IFS desde 22/09/2026.** Guia atual em §7; o texto
    abaixo é o registro da migração (§6.4),
    com o número `+1 555-379-4876` — cortesia, agente e fontes chegando pelo
-   WhatsApp. **Falta remover o webhook interino**, o que também elimina a
-   Function URL pública que aceita POST sem assinatura. Componentes:
+   WhatsApp. O webhook interino foi removido em 02/10/2026 (§7.5). Componentes:
    - entrada: `lambda_entry.whatsapp_social_handler` (Lambda
      `progep-ifs-whatsapp-social`, assinada no tópico
      `progep-ifs-whatsapp-inbound`);
-   - envio: `src/adapters/whatsapp_social.py`, com a mesma interface do cliente
-     da Graph API;
-   - atendimento: `lambda_entry.processar_mensagens_whatsapp`, compartilhado
-     pelas duas entradas.
+   - envio: `src/adapters/whatsapp_social.py`;
+   - atendimento: `lambda_entry.processar_mensagens_whatsapp`.
 
    Passos no console, **nesta ordem**, porque o canal atual cai no momento do
    vínculo:
@@ -618,11 +614,7 @@ de assinatura HMAC **deixam de existir**, porque a AWS passa a autenticar.
    3. na WABA, *Event destination* → Amazon SNS → colar o ARN do passo 1;
    4. mandar mensagem para o número e conferir o log da Lambda
       `progep-ifs-whatsapp-social`;
-   5. só depois de funcionar, remover o webhook interino.
-
-   > Na virada convivem conversas gravadas com o id da Meta e com o ARN da AWS.
-   > O encerramento por inatividade escolhe o cliente pela origem gravada, então
-   > cada conversa é fechada pelo canal por onde começou.
+   5. só depois de funcionar, remover o caminho anterior.
 2. ~~Definir horário real de atendimento~~ — seg–sex, 9h–18h, aplicado na
    Lambda (§6.2). O horário `progep-ifs-24x7` da fila ficou como estava: nenhum
    bloco do fluxo o consulta, e quem decide oferecer é a Lambda.
@@ -805,17 +797,26 @@ prefira número próprio.
   (`msg#<wamid>`, condicional, TTL 24 h) e a repetição é ignorada; entrada
   logada como `[entrada] msg=<wamid>` (sem texto).
 - **Janela de 24 h:** respostas a quem escreveu nas últimas 24 h são mensagens
-  de serviço — sem tarifa da Meta; a AWS cobra US$ 0,005 por mensagem enviada e
-  US$ 0,001 por recebida. Iniciar conversa fora da janela exige template (pago).
+  de serviço. Desde 01/10/2026 a Meta cobra cerca de US$ 0,0068 por mensagem de
+  serviço entregue acima de **1.000 por número por mês** (órgão público
+  elegível pode ser isento; não confirmado para o IFS). A AWS cobra US$ 0,005
+  por mensagem enviada e US$ 0,001 por recebida. Iniciar conversa fora da
+  janela exige template (pago). O consumo real aparece na aba "Custos" (§8.6).
 
-### 7.5 Legado a remover
+### 7.5 Legado removido (02/10/2026)
 
-O webhook interino (Lambda `progep-ifs-whatsapp-webhook` + Function URL
-pública) atende o número de teste antigo pela Graph API. Com `app_secret` vazio
-no segredo, **aceita POST sem assinatura** — um risco sem utilidade desde a
-migração. Remover a Lambda e a Function URL. O segredo `progep-ifs/whatsapp`
-ainda é usado: pelo encerramento de conversas iniciadas pelo webhook (origem
-não-ARN) e pelos scripts de diagnóstico da Graph API.
+- **Webhook interino** do número de teste antigo: Lambda
+  `progep-ifs-whatsapp-webhook` + Function URL pública. Com `app_secret` vazio
+  no segredo, aceitava POST sem assinatura (qualquer um com o link disparava o
+  agente). Saiu junto com `src/adapters/whatsapp_cloud.py`; o leitor do payload
+  da Meta, que o End User Messaging repassa, foi para `whatsapp_social.py`.
+- **Fluxo antigo do Connect** do desenho original: Lambda `progep-ifs-connect`
+  (`connect_handler`) e contact flow `progep-ifs-assistente-progep`, que
+  chamava o assistente a cada mensagem pelo Connect. Nada o usava; o transbordo
+  usa `progep-ifs-transbordo-whatsapp`.
+
+O segredo `progep-ifs/whatsapp` **fica**, só para o diagnóstico manual (§7.6);
+nenhuma Lambda o lê mais.
 
 ### 7.6 Diagnóstico pela Graph API
 
@@ -901,6 +902,69 @@ arquivo sobe mas o navegador acusa "Failed to fetch".
   a rota nova não é publicada no stage.
 - Nomes de arquivo do portal vêm com acento codificado como `-C3-A7`
   (`fontes.decodificar_nome` corrige).
+
+### 8.6 Aba "Custos" (controle de custos)
+
+Mostra quanto o assistente gastou hoje, nos últimos 7 e 30 dias e no mês,
+com projeção de fechamento, custo por pergunta, cota grátis da Meta e
+detalhamento por item. Só o grupo `administradores` vê (rota
+`GET /acervo/custos`, mesma Lambda do acervo, que só **lê** a tabela).
+
+**O valor é medido, não estimado:** cada consumo real × preço público
+(`src/domain/custos.py:PRECOS`, conferidos em 02/10/2026). Conferido contra a
+fatura de setembro: o modelo Claude bateu **ao centavo, dia a dia**
+(US$ 1,4586 medido = faturado).
+
+**Só a PROGEP.** A conta é compartilhada com `den` e `diae`, então a atribuição
+é pelo recurso que consumiu, nunca pelo total do serviço na fatura:
+
+| Item | Fonte | Atraso |
+|---|---|---|
+| Modelo, busca, indexação, equipe técnica | log de invocações do Bedrock, pela identidade (`custos.item_da_invocacao`): role `progep-ifs-agentcore-exec` = assistente; role `progep-ifs-kb-*` com sessão `BKB-Retrieve` = busca, outra sessão = indexação; `DNXAccess/<e-mail>` listado em `custosEquipeTecnica` = transcrições e testes | 1–5 min |
+| WhatsApp (AWS e Meta) | linhas `[entrada]` e `[entrega] sent/delivered` da Lambda `whatsapp-social`; a tarifa da Meta só acima de 1.000 entregues no mês (contador por mês UTC) | segundos |
+| Atendimento humano | linha `[chat] mensagem` (Connect cobra cada mensagem do chat) | segundos |
+| Execução (AgentCore) e perguntas | métricas `CPUUsed-vCPUHours`, `MemoryUsed-GBHours` e `Invocations` do nosso runtime | 1 h |
+| Lambda, DynamoDB, API Gateway, logs | métricas por função/tabela/API/log group com prefixo `progep-ifs` | 1 h |
+| Armazenamento, segredos | tamanho dos buckets, imagens do ECR, vetores (6 KB cada) e 2 segredos, rateados por dia | 1 h |
+| CloudTrail | fatura (Cost Explorer); a única trilha paga da conta é a `progep-ifs-trail` | até 24 h |
+
+Peças: tabela `progep-ifs-custos` (`pk = custo#AAAA-MM`, `sk = dia#categoria#item`);
+Lambda `progep-ifs-custos-logs`, assinada nos três log groups
+(`CUSTOS_ASSINATURAS` em `resources.py`), que **soma** com marca por evento
+contra reentrega; Lambda `progep-ifs-custos-coleta`, de hora em hora, que
+**substitui** os itens de métrica (idempotente) e lê a fatura a cada 12 h. O
+controle custa centavos por mês, e ele mesmo aparece na tabela ("Este controle
+de custos").
+
+Configuração:
+
+```bash
+pulumi config set progep-ifs:custosEquipeTecnica <e-mail1>,<e-mail2>
+# quando a Meta confirmar a isenção de órgão público:
+pulumi config set progep-ifs:custosMetaIsento true
+```
+
+Histórico anterior ao deploy (reprocessa logs e métricas com as mesmas funções;
+pode rodar de novo sem duplicar):
+
+```bash
+python scripts/custos_retroativo.py --inicio 2026-09-01 --simular
+python scripts/custos_retroativo.py --inicio 2026-09-01
+```
+
+Limites conhecidos:
+- Mensagens **recebidas** antes de 02/10/2026 não entram: a linha `[entrada]`
+  era INFO, e o runtime da Lambda deixa a raiz em WARNING, então ela **nunca
+  chegou ao CloudWatch** (corrigido com `logger.setLevel(INFO)` em
+  `lambda_entry` e `connect_chat`). São US$ 0,001 cada.
+- Métrica personalizada é cobrada por hora com dado. Até 02/10/2026 o Monitor
+  de Consumo publicava 2 séries **por sessão** (dimensão `SessionId`: 186
+  séries em duas semanas), e o controle conta 1 hora por pergunta nesses dias
+  (o teto). A partir de 03/10 o Monitor publica sem dimensão (a sessão fica na
+  linha de log) e o custo passa a depender das horas com uso, não do número de
+  conversas (`MONITOR_SEM_SESSAO_DESDE` em `custos_handler.py`).
+- Serviços que ficam na faixa gratuita ou abaixo de um centavo por mês
+  (Cognito, CloudFront, SNS) não aparecem.
 
 ---
 
@@ -1117,10 +1181,11 @@ localmente o caso que motivou a mudança (os scripts de comparação montam o
    perguntas de saúde recebem só 2 trechos (§4.4), baterias antes/depois.
    Decisão do cliente: manter ou retirar o manual de 2017.
 3. **Remover o webhook legado** (§7.5).
-4. **Custo evitável:** a trilha `progep-ifs-trail` duplica os eventos de gestão
-   que a trilha `dnx` da organização já grava — ~US$ 4/mês e crescendo.
-   Trocar para `WriteOnly` ou removê-la (confirmar com o cliente a exigência de
-   auditoria).
+4. ~~Custo evitável da trilha duplicada~~ — **feito em 02/10/2026**: a
+   `progep-ifs-trail` continua criada, com o registro **desligado**
+   (`progep-ifs:trilhaPropria`, padrão `false`); a trilha `dnx` da organização
+   cobre a conta. Religar se a conta sair da organização da DNX:
+   `pulumi config set progep-ifs:trilhaPropria true` + `pulumi up`.
 
 ### Pendências com o cliente
 
@@ -1153,6 +1218,20 @@ localmente o caso que motivou a mudança (os scripts de comparação montam o
 ---
 
 ## 13. Changelog
+
+### 2026-10-02
+- **Aba "Custos" no painel** (§8.6): custo medido em tempo real, só da
+  PROGEP, conferido contra a fatura de setembro ao centavo.
+- Linhas INFO das Lambdas (`[entrada]`, `[transbordo]`) nunca chegavam ao
+  CloudWatch; agora chegam.
+- **Otimizações de custo:** trilha própria do CloudTrail desligada (a da
+  organização cobre a conta; era ~US$ 4,30/mês); ciclo de vida no ECR (imagens
+  sem tag expiram em 7 dias; eram 55 imagens, 2,9 GB); Monitor de Consumo sem a
+  dimensão `SessionId`. Custo fixo: de US$ 6–7 para cerca de US$ 1–2 por mês.
+- **Limpeza e privacidade:** removidos o webhook do número de teste e o fluxo
+  antigo do Connect (§7.5) e funções sem uso; o telefone de quem conversa vai
+  para os logs só com os 4 últimos dígitos (`domain/privacidade.py`); os log
+  groups da PROGEP passaram a vencer em 90 dias (`scripts/retencao_logs.py`).
 
 ### 2026-10-01
 - **Contatos dos setores não chegavam em produção:** a imagem da v13 não

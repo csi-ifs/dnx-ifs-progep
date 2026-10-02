@@ -182,16 +182,6 @@ def enforce_single_environment(environments: Iterable[str]) -> str:
     return distinct[0]
 
 
-def current_stack() -> str:
-    """Return the active Pulumi stack name for this execution (Req 9.2).
-
-    Raises:
-        RuntimeError: If Pulumi is not available in the environment.
-    """
-    _require_pulumi()
-    return pulumi.get_stack()
-
-
 # --- Tagging-exception registry (Req 8.6) ---------------------------------------
 
 

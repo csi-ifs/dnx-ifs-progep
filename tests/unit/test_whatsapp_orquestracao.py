@@ -1,10 +1,8 @@
-"""Testes da orquestração do canal WhatsApp e das suas duas entradas.
+"""Testes da orquestração do canal WhatsApp.
 
-O ``whatsapp_handler`` **não tinha teste nenhum** quando a orquestração foi
-extraída para servir também ao End User Messaging Social. Estes testes fixam o
-comportamento que o usuário vê — e que não pode mudar na migração: mídia
-recusada, limite de tamanho, "digitando", cortesias, saudação só na abertura,
-sessão por remetente e fontes citadas.
+Fixam o comportamento que o servidor vê: mídia recusada, limite de tamanho,
+"digitando", cortesias, saudação só na abertura, sessão por remetente, fontes
+citadas, contatos dos setores e transbordo para o atendente.
 """
 
 from __future__ import annotations
@@ -294,28 +292,13 @@ def test_sem_origem_nao_tenta_responder(cliente_social, loja, agente):
     cliente_social.send_text.assert_not_called()
 
 
-# --- Encerramento na transição -------------------------------------------------
+# --- Encerramento ----------------------------------------------------------------
 
-def test_encerramento_escolhe_o_cliente_pela_origem_gravada(monkeypatch):
-    """Na virada, há conversas gravadas com id da Meta (webhook antigo) e com
-    ARN da AWS (novo caminho). Cada uma precisa ser encerrada pelo canal por
-    onde começou."""
-    from src.adapters.whatsapp_cloud import WhatsAppCloudClient
+def test_encerramento_sai_pelo_end_user_messaging():
+    """Só existe um caminho de envio desde a saída do webhook de teste."""
     from src.adapters.whatsapp_social import WhatsAppSocialClient
 
-    monkeypatch.setattr(lambda_entry, "_get_whatsapp_secret", lambda: {"access_token": "t"})
-
     assert isinstance(lambda_entry._cliente_para_origem(ORIGEM), WhatsAppSocialClient)
-    assert isinstance(lambda_entry._cliente_para_origem("1176961198827673"), WhatsAppCloudClient)
-
-
-def test_encerramento_pelo_caminho_novo_nao_le_o_segredo_da_meta(monkeypatch):
-    """Depois da migração o segredo da Meta pode nem existir mais."""
-    def sem_segredo():
-        raise AssertionError("não deveria ler o segredo da Meta")
-
-    monkeypatch.setattr(lambda_entry, "_get_whatsapp_secret", sem_segredo)
-    lambda_entry._cliente_para_origem(ORIGEM)
 
 
 # --- Transbordo: oferta ---------------------------------------------------------

@@ -100,12 +100,3 @@ def guard_llm_call(
         return BillingGuardResult(allowed=True, error=None)
 
     return BillingGuardResult(allowed=False, error=billing_error())
-
-
-def is_billing_annotated(
-    config: Mapping[str, Any] | None,
-    *,
-    user_agent_key: str = DEFAULT_USER_AGENT_KEY,
-) -> bool:
-    """Return ``True`` iff ``config`` carries the exact ``User_Agent_APN`` (Req 8.3)."""
-    return guard_llm_call(config, user_agent_key=user_agent_key).allowed

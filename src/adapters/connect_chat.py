@@ -36,6 +36,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
+# INFO explícito: a raiz da Lambda fica em WARNING, e a linha [chat] (contada
+# pelo controle de custos) precisa chegar ao CloudWatch.
+logger.setLevel(logging.INFO)
 
 #: Duração máxima do chat no Connect. 24 h acompanha a janela de atendimento da
 #: Meta: depois dela o WhatsApp só aceita template, então a fala do atendente não
@@ -74,6 +77,9 @@ class EventoDoChat:
     papel: str
     conteudo: str = ""
     nome: str = ""
+    #: Id da entrada no chat — o mesmo que o ``SendMessage`` devolveu, quando a
+    #: mensagem é do servidor.
+    id: str = ""
 
     @property
     def mensagem_do_atendente(self) -> bool:
@@ -140,6 +146,7 @@ def parse_stream_event(evento: Mapping[str, Any]) -> list[EventoDoChat]:
                 papel=str(corpo.get("ParticipantRole", "") or ""),
                 conteudo=str(corpo.get("Content", "") or ""),
                 nome=str(corpo.get("DisplayName", "") or ""),
+                id=str(corpo.get("Id", "") or ""),
             )
         )
     return eventos
@@ -253,11 +260,15 @@ class ConnectChatBridge:
         return resposta["ConnectionCredentials"]["ConnectionToken"]
 
     def _enviar(self, connection_token: str, texto: str) -> None:
-        self.participant.send_message(
+        resposta = self.participant.send_message(
             ContentType="text/plain",
             Content=texto,
             ConnectionToken=connection_token,
         )
+        # O Connect cobra cada mensagem do chat; esta linha é o que o controle de
+        # custos conta (src/domain/custos.py). O mesmo id volta pelo streaming,
+        # e a marca de evento impede contar duas vezes.
+        logger.info("[chat] mensagem papel=%s id=%s", PAPEL_SERVIDOR, (resposta or {}).get("Id", ""))
 
     # -- conversa em andamento ---------------------------------------------------
 

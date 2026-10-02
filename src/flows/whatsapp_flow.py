@@ -30,10 +30,9 @@ AWS access.
    acionado **só no transbordo**. Pagar um contato de chat por pergunta que o
    assistente responde sozinho é custo sem contrapartida.
 
-   Este módulo ainda implementa o caminho antigo e será reescrito. Ele **não**
-   está no caminho em produção hoje — o canal ativo é o webhook interino
-   (``lambda_entry.whatsapp_handler``), que não toca no Connect.
-   Ver ``docs/documentacao-tecnica.md`` §6.4.
+   Este módulo implementa o caminho antigo e **não** está em produção: o canal
+   ativo é ``lambda_entry.whatsapp_social_handler``. Ver
+   ``docs/documentacao-tecnica.md`` §6.4.
 """
 
 from __future__ import annotations

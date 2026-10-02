@@ -41,7 +41,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
 from src.domain.api import (
     AUTH_ERROR_CODE,

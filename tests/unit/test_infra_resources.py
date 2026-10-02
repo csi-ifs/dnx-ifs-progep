@@ -151,3 +151,38 @@ def test_arn_context_scopes_to_named_resources():
         all_resources.extend([res] if isinstance(res, str) else res)
     assert any("my-sessions" in r for r in all_resources)
     assert any("123456789012" in r for r in all_resources)
+
+
+# --- Controle de custos ----------------------------------------------------------
+
+
+def test_politica_de_custos_so_usa_curinga_nas_leituras_sem_recurso():
+    ctx = R.ArnContext(account_id="123456789012", region="us-east-1")
+    doc = R.custos_policy_document(
+        ctx, ecr_repository_arn="arn:aws:ecr:us-east-1:123456789012:repository/progep-ifs-agentcore"
+    )
+    com_curinga = [s for s in doc["Statement"] if s["Resource"] == "*"]
+    assert len(com_curinga) == 1
+    assert sorted(com_curinga[0]["Action"]) == sorted(R.CUSTOS_WILDCARD_ACTION_EXCEPTIONS)
+    # Escrita só na própria tabela.
+    escrita = [s for s in doc["Statement"]
+               if any(a in ("dynamodb:PutItem", "dynamodb:UpdateItem") for a in _acoes(s))]
+    assert [s["Resource"] for s in escrita] == [
+        "arn:aws:dynamodb:us-east-1:123456789012:table/progep-ifs-custos"]
+
+
+def test_painel_le_a_tabela_de_custos_sem_escrever():
+    doc = R.component_policy_documents(R.ArnContext(account_id="1", region="us-east-1"))
+    leitura = next(s for s in doc["acervo_role"]["Statement"] if s.get("Sid") == "LerCustos")
+    assert sorted(_acoes(leitura)) == ["dynamodb:GetItem", "dynamodb:Query"]
+
+
+def _acoes(statement):
+    acoes = statement["Action"]
+    return [acoes] if isinstance(acoes, str) else acoes
+
+
+def test_ciclo_de_vida_do_ecr_nunca_toca_imagem_com_tag():
+    regras = R.ECR_LIFECYCLE_POLICY["rules"]
+    assert [r["selection"]["tagStatus"] for r in regras] == ["untagged"]
+    assert regras[0]["selection"]["countNumber"] >= 7

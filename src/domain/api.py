@@ -132,16 +132,6 @@ def build_response(
     return ApiResponse(status=ApiStatus.OK.value, content=content, error=None)
 
 
-def success_response(content: str) -> ApiResponse:
-    """Return a success envelope carrying ``content`` (Req 5.1, 5.4)."""
-    return build_response(content=content)
-
-
-def error_response(code: str, message: str) -> ApiResponse:
-    """Return an error envelope carrying an :class:`ErrorDetail` (Req 5.4)."""
-    return build_response(error=ErrorDetail(code=code, message=message))
-
-
 # --- Authentication error sanitization (Req 10.4, Property 19) ------------------
 
 def sanitize_auth_error(context: object = None) -> str:
