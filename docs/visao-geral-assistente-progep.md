@@ -1,7 +1,7 @@
 # Assistente Virtual da PROGEP — Visão Geral
 
 **Instituto Federal de Sergipe · Pró-Reitoria de Gestão de Pessoas**
-Documento de apresentação · setembro de 2026 · DNX Brasil
+Documento de apresentação · outubro de 2026 · DNX Brasil
 
 ---
 
@@ -27,10 +27,11 @@ Três características definem o assistente:
 | Canal | Situação |
 |---|---|
 | **WhatsApp** — número +55 79 3711-1496 ([abrir conversa](https://wa.me/557937111496)) | Em funcionamento |
-| **Site do IFS** | Pronto do lado do assistente; aguarda decisão do IFS sobre a forma de acesso e a integração pela equipe do site |
+| **Site do IFS** | A porta de entrada (API) está pronta, mas não foi integrada ao site: o foco do projeto foi o WhatsApp. A equipe do site pode fazer a integração seguindo o guia da documentação técnica (seção 5.5) |
 
-O nome exibido no WhatsApp será **"IFS - Progep"** (aprovado pela Meta; falta
-apenas ativá-lo no número).
+O nome **"IFS - Progep"** foi aprovado pela Meta para o número. Ele passa a
+aparecer no WhatsApp depois de um registro do número, feito pelo administrador
+do portfólio do IFS na Meta (passo a passo na documentação técnica, seção 7.3).
 
 ---
 
@@ -117,7 +118,8 @@ Nenhum componente fica em servidor próprio da DNX.
 | Atendimento humano | Amazon Connect | Fila da PROGEP e painel dos atendentes |
 | Memória da conversa | Amazon DynamoDB | Guarda por pouco tempo o andamento de cada conversa |
 | Automações | AWS Lambda | Pequenos programas que ligam as partes: recebem a mensagem, chamam o assistente, encerram conversas paradas |
-| Painel do acervo | Amazon CloudFront, S3 e Amazon Cognito | Página com login para a PROGEP gerenciar os documentos da base |
+| Painel do acervo | Amazon CloudFront, S3 e Amazon Cognito | Página com login para a PROGEP gerenciar os documentos da base e acompanhar os custos |
+| Controle de custos | AWS Lambda, Amazon DynamoDB e AWS Cost Explorer | Mede o gasto do assistente poucos minutos depois de cada uso e confere com a fatura |
 | Conexão com o site | Amazon API Gateway e Amazon Cognito | Porta de entrada para o site do IFS consultar o assistente |
 | Segurança e registros | AWS Secrets Manager, CloudWatch e CloudTrail | Guardam as credenciais com segurança, registram o funcionamento e auditam as alterações |
 
@@ -128,8 +130,12 @@ Nenhum componente fica em servidor próprio da DNX.
 **Endereço:** https://d2ush4hjiv6t7m.cloudfront.net
 
 O painel permite que a própria PROGEP mantenha a base de documentos
-atualizada, sem depender da DNX. O acesso é feito com usuário e senha, e só as
-pessoas autorizadas pela PROGEP podem alterar a base.
+atualizada, sem depender da DNX, e acompanhe quanto o assistente custa.
+
+**Acesso:** o painel exige login (usuário e senha), e só as pessoas
+autorizadas pela PROGEP entram. Para ganhar acesso, peça à DNX informando o
+nome e o e-mail institucional da pessoa; ela recebe por e-mail uma senha
+temporária, trocada no primeiro login.
 
 ### O que dá para fazer
 
@@ -147,7 +153,8 @@ pessoas autorizadas pela PROGEP podem alterar a base.
   pergunta e quanto da cota grátis de mensagens da Meta já foi usado. O valor
   é **medido a partir do uso real**, não estimado, e aparece poucos minutos
   depois de cada pergunta. Conta **só o assistente da PROGEP**: a conta da AWS
-  do IFS também tem outros projetos, que ficam de fora.
+  do IFS também tem outros projetos, que ficam de fora. Como ler cada número:
+  [custos-assistente-progep.md](custos-assistente-progep.md).
 
 ### Boas práticas
 
@@ -163,110 +170,26 @@ pessoas autorizadas pela PROGEP podem alterar a base.
 
 ## 5. Custos
 
-Os valores estão em **dólar americano**, moeda em que a AWS cobra. Em reais,
-variam com o câmbio. Sobre eles incidem os impostos cobrados pela AWS na
-fatura: nesta conta, cerca de 13%.
+O detalhamento completo, item a item, está em
+[custos-assistente-progep.md](custos-assistente-progep.md). Em resumo:
 
-Os custos se dividem em duas partes: uma **fixa**, que existe mesmo sem uso, e
-uma **por uso**, proporcional à quantidade de perguntas.
-
-Os valores reais, dia a dia, ficam na aba **"Custos" do painel do acervo**
-(seção 4). As tabelas abaixo servem para planejar volumes que ainda não
-aconteceram.
-
-### Custo por pergunta
-
-Medido em setembro de 2026, com 78 perguntas reais ao assistente.
-
-| Item | Custo por pergunta |
+| | Valor |
 |---|---|
-| Inteligência das respostas (modelo Claude) | US$ 0,017 |
-| Execução do assistente (AgentCore) | até US$ 0,02 |
-| Mensagens do WhatsApp (tarifa da AWS) | US$ 0,011 |
-| Busca nos documentos | menos de US$ 0,001 |
-| **Total por pergunta** | **US$ 0,03 a 0,05** |
+| Custo por pergunta | US$ 0,03 a 0,05 |
+| Custo fixo mensal (existe mesmo sem uso) | cerca de US$ 2 a 3 |
+| Setembro/2026, fase de testes (98 perguntas), medido | US$ 8,17 |
+| Previsão para 1.000 perguntas por mês | US$ 35 a 60 |
+| Montagem da base de documentos (uma única vez) | cerca de US$ 6 a 7 |
+| Acrescentar um documento com texto | menos de US$ 0,001 |
 
-**Tarifa da Meta (desde 01/10/2026).** Cada número tem **1.000 mensagens de
-resposta grátis por mês**. A partir da 1.001ª, a Meta cobra cerca de
-**US$ 0,0068 por mensagem** entregue. Com 1,5 a 2 mensagens enviadas por
-pergunta, a cota cobre de 500 a 650 perguntas por mês. Acima disso, o custo
-por pergunta sobe cerca de US$ 0,01. A Meta indica que órgãos públicos
-elegíveis podem continuar isentos; a elegibilidade do IFS ainda precisa ser
-confirmada com a Meta.
+Os valores estão em **dólar americano**, sem os impostos da fatura da AWS
+(cerca de 13% nesta conta). Desde 01/10/2026 a Meta cobra as mensagens do
+WhatsApp acima de 1.000 por mês; a previsão acima já inclui essa tarifa. O
+IFS pode ser isento por ser órgão público, o que ainda precisa ser confirmado
+com a Meta.
 
-### Estimativa mensal por volume de uso
-
-| Perguntas por mês | Custo de uso estimado | Tarifa da Meta (sem isenção) |
-|---|---|---|
-| 1.000 | US$ 30 a 50 | + US$ 3 a 7 |
-| 5.000 | US$ 150 a 250 | + US$ 45 a 60 |
-| 10.000 | US$ 300 a 500 | + US$ 95 a 130 |
-
-### Atendimento humano
-
-Cobrado só quando usado: **US$ 0,01 por mensagem** trocada no chat do
-atendimento, além da tarifa normal do WhatsApp. Um atendimento típico, de 10 a
-20 mensagens, custa de US$ 0,10 a 0,20. Não há mensalidade por atendente.
-
-### Custo fixo mensal
-
-| Item | Custo por mês |
-|---|---|
-| Guarda segura de credenciais (Secrets Manager) | US$ 0,80 |
-| Monitoramento (CloudWatch) | US$ 0,20 a 1 |
-| Armazenamento (documentos, índice de busca e imagem do assistente) | menos de US$ 0,10 |
-| Registro de auditoria (CloudTrail) | sem custo (ver abaixo) |
-| Banco de conversas, automações, painel e API | centavos |
-| **Total fixo** | **cerca de US$ 1 a 2** |
-
-**Economia aplicada em 02/10/2026.** O custo fixo era de US$ 6 a 7 por mês. A
-maior parte vinha do registro de auditoria do projeto, que duplicava o
-registro geral que a organização já mantém para a conta; a AWS cobra a
-segunda cópia, e ela foi desligada sem perda de auditoria. As versões antigas
-da imagem do assistente passaram a ser apagadas depois de 7 dias. Se a conta
-do IFS deixar a organização da DNX, o registro próprio deve ser religado
-(é uma configuração, já preparada).
-
-### Base de conhecimento
-
-**Quanto custou montar a base atual** (cerca de 420 documentos, medido na
-fatura e no uso do modelo de julho a setembro de 2026):
-
-| Item | Custo |
-|---|---|
-| Transcrição dos 94 fluxogramas do Mapeamento de Processos (imagens lidas pelo modelo Claude) | cerca de US$ 5,40 |
-| Transcrição de documentos escaneados (PDFs sem texto) | menos de US$ 1 |
-| Preparação dos documentos para a busca (todas as indexações) | US$ 0,09 |
-| Gravação no índice de busca | US$ 0,03 |
-| **Total** | **cerca de US$ 6 a 7, uma única vez** |
-
-Manter a base guardada custa **menos de US$ 0,02 por mês**: são cerca de
-170 MB de documentos e 12.600 trechos no índice de busca.
-
-**Quanto custa acrescentar documentos novos:**
-
-| Tipo de documento | Custo estimado |
-|---|---|
-| Documento com texto (PDF digital, Word, HTML, texto) | praticamente zero: menos de US$ 0,001 por documento. Cem documentos de 20 páginas custam menos de US$ 0,05 |
-| PDF escaneado (precisa ser transcrito) | cerca de US$ 0,02 por página. Um documento de 20 páginas sai por cerca de US$ 0,40 |
-| Fluxograma em imagem | cerca de US$ 0,06 por fluxograma (valor medido) |
-
-Ou seja: enviar documentos pelo painel do acervo não pesa no custo. Só a
-transcrição de material em imagem tem custo perceptível, e ela é feita uma
-única vez por documento.
-
-### Visão geral
-
-| Cenário | Custo mensal aproximado |
-|---|---|
-| Fase de testes (setembro/2026, 98 perguntas), medido | US$ 8,17 |
-| 1.000 perguntas por mês | US$ 30 a 55 |
-| 5.000 perguntas por mês | US$ 150 a 255 |
-
-Os cenários de volume não incluem a tarifa da Meta acima da cota grátis (ver
-"Tarifa da Meta"). A conta AWS é compartilhada com outros projetos do IFS; os
-valores acima consideram apenas o que é do assistente da PROGEP, medido pelos
-recursos do próprio assistente.
+O **gasto real**, dia a dia, aparece na aba **"Custos" do painel** (seção 4),
+com acesso por login.
 
 ---
 

@@ -7,9 +7,11 @@ operar, como diagnosticar e o que ainda falta. É o documento para quem for
 manter ou evoluir o projeto.
 
 A visão para o cliente (o que é, como funciona, custos, em linguagem não
-técnica) está em [visao-geral-assistente-progep.md](visao-geral-assistente-progep.md).
+técnica) está em [visao-geral-assistente-progep.md](visao-geral-assistente-progep.md),
+e o detalhamento dos custos, com o acesso à aba "Custos", em
+[custos-assistente-progep.md](custos-assistente-progep.md).
 
-Última atualização: 2026-09-30.
+Última atualização: 2026-10-08.
 
 ---
 
@@ -36,13 +38,14 @@ etapa inventada é pior que uma lacuna assumida, porque ninguém percebe o erro.
 |---|---|
 | WhatsApp institucional **+55 79 3711-1496** (End User Messaging Social) | Em produção desde 22/09/2026 |
 | Transbordo humano (Amazon Connect) | Validado em 22/09/2026; atendentes de teste (§6) |
-| API do site institucional (autenticada via Cognito) | Funcionando; integração aguarda decisão do IFS (§5.4) |
+| API para o site institucional (autenticada via Cognito) | Publicada; não integrada ao site — guia em §5.5 |
 | WhatsApp de teste +1 555-379-4876 (End User Messaging) | Desenvolvimento; bloqueado pela Meta (erro 131037, §7) |
 | WhatsApp de teste +1 555 176-1308 (webhook interino, Graph API) | Removido em 02/10/2026 (§7.5) |
 
-**Estado atual:** ~420 documentos na base, 738 testes automatizados, resposta
+**Estado atual:** ~420 documentos na base, 769 testes automatizados, resposta
 em ~5–7 s, continuidade de conversa, contatos dos setores quando não há
-resposta, e painel web para a PROGEP manter o acervo (§8).
+resposta, e painel web para a PROGEP manter o acervo (§8) e acompanhar os
+custos medidos do assistente (§8.6).
 
 ---
 
@@ -60,6 +63,8 @@ src/
               #   contatos.py   — catálogo de contatos e assuntos dos setores
               #   fontes.py     — nome legível das fontes citadas
               #   acervo.py     — regras do painel (nomes, chaves, lixeira)
+              #   custos.py     — preços, atribuição e resumo da aba Custos
+              #   privacidade.py— mascara o telefone antes de ir para log
   adapters/   # fronteira de I/O
               #   agent.py             — RAG (retrieve + generate) e
               #                          classificação de setor
@@ -68,22 +73,26 @@ src/
               #                          (sessão, atividade, transbordo, dedup)
               #   lambda_entry.py      — wiring das Lambdas e orquestração
               #                          do WhatsApp
-              #   whatsapp_social.py   — End User Messaging Social (produção)
-              #   whatsapp_cloud.py    — Graph API da Meta (webhook legado)
+              #   whatsapp_social.py   — End User Messaging Social
               #   connect_chat.py      — ponte WhatsApp ↔ chat do Connect
-              #   acervo_handler.py    — API do painel do acervo
+              #   acervo_handler.py    — API do painel (acervo e custos)
+              #   custos_handler.py    — coleta de custos (logs e métricas)
+              #   custos_store.py      — tabela de custos (DynamoDB)
               #   api_handler.py       — handler da API do site (injetável)
               #   knowledge.py         — ingestion jobs da KB
               #   monitor_adapter.py   — métricas CloudWatch
-              #   connect_router.py, whatsapp_connector.py — caminhos antigos,
-              #                          substituídos (mantidos só por testes)
-  flows/      # orquestração: site, ingestão (whatsapp_flow.py é legado)
+              #   connect_router.py, whatsapp_connector.py — desenho original
+              #                          (Connect em toda mensagem), fora de
+              #                          produção, mantidos pelos testes da spec
+  flows/      # orquestração: ingestão (em produção); site_flow e
+              # whatsapp_flow são do desenho original, só usados pelos testes
   infra/      # IaC Pulumi (provider, resources, connect_flow, __main__)
 agentcore/    # entrypoint (app.py) e Dockerfile do AgentCore Runtime
 frontend/     # painel do acervo (React + Vite)
-scripts/      # ingestão, transcrição, testes e deploy (ver §3.3)
+scripts/      # ingestão, transcrição, testes, custos e deploy (ver §3.3)
 tests/        # property / unit / integration
-docs/         # documentação, transcrições (ocr/, fluxos/, faq/)
+docs/         # documentação; as transcrições (ocr/, fluxos/, faq/) ficam
+              # fora do git — a versão indexada está no S3 da base
 ```
 
 ### 2.2 Arquitetura
@@ -103,6 +112,10 @@ docs/         # documentação, transcrições (ocr/, fluxos/, faq/)
                                                                          │
    Painel do acervo ── CloudFront → S3 (estático); API /acervo           │
                → Lambda progep-ifs-acervo → S3 documentos + KB           │
+                                       └→ tabela progep-ifs-custos (leitura)
+   Custos: logs (invocações, WhatsApp, chat) → Lambda custos-logs ──┐    │
+           EventBridge (1 h) → Lambda custos-coleta (métricas,      ├→ DynamoDB
+                               Cost Explorer a cada 12 h) ──────────┘  progep-ifs-custos
                                                                          v
                         ┌─────────────────────────────────────────────┐
                         │   Bedrock AgentCore Runtime                 │
@@ -180,15 +193,17 @@ No WhatsApp (`lambda_entry.processar_mensagens_whatsapp`), nesta ordem:
 | AWS Lambda | `-api`, `-acervo`, `-ingestor`, `-whatsapp-social`, `-whatsapp-encerramento`, `-connect-chat-stream`, `-custos-logs`, `-custos-coleta` | Handlers (§3.4) |
 | Amazon SNS | `progep-ifs-whatsapp-inbound`, `progep-ifs-connect-chat-stream` | Entrada do WhatsApp; espelho do chat do Connect |
 | AWS End User Messaging Social | WABA `IFS - PROGEP` (+55 79 3711-1496); WABA `Projeto dev` (teste) | Canal WhatsApp (§7) |
-| Amazon EventBridge | regra `progep-ifs-whatsapp-encerramento` (5 min) | Varredura de inatividade |
+| Amazon EventBridge | regras `progep-ifs-whatsapp-encerramento` (5 min) e `progep-ifs-custos-coleta` (1 h) | Varredura de inatividade; coleta de custos |
 | Amazon API Gateway | `57hy9et9yh` (stage `prod`: `/message`, `/acervo/*`) | API do site e do painel |
 | Amazon Cognito | pool `us-east-1_3YNaD3UOP` (grupo `administradores`) | Login do painel e da API |
-| Amazon ECR | `progep-ifs-agentcore` | Imagem do runtime |
+| Amazon ECR | `progep-ifs-agentcore` (imagens sem tag expiram em 7 dias) | Imagem do runtime |
 | DynamoDB | `progep-ifs-sessions` (TTL) | Estado das conversas, índice de atendimentos, marcas de mensagem |
+| DynamoDB | `progep-ifs-custos` (TTL só nas marcas) | Custos medidos por dia e item (§8.6) |
+| AWS Cost Explorer | — (leitura a cada 12 h) | Fatura do CloudTrail e conferência do modelo (§8.6) |
 | Amazon Connect | instância `progep-ifs-progep` | Fila e painel do atendimento humano (§6) |
-| Secrets Manager | `progep-ifs/whatsapp`, `progep-ifs-secrets` | Segredos (token da Meta do webhook legado) |
-| CloudWatch / X-Ray | log groups + `aws/spans` | Observabilidade |
-| CloudTrail | trilha `progep-ifs-trail` | Auditoria (duplica a trilha `dnx` da organização — §12) |
+| Secrets Manager | `progep-ifs/whatsapp`, `progep-ifs-secrets` | Token da Graph API, só para diagnóstico manual (§7.6) |
+| CloudWatch / X-Ray | log groups (90 dias) + `aws/spans` | Observabilidade |
+| CloudTrail | trilha `progep-ifs-trail`, **desligada** | A trilha `dnx` da organização cobre a conta; religar: §12 |
 
 Todo recurso que suporta tags recebe `aws-apn-id: pc:7b0pljcsg0gii1a5gn5vfca0v`.
 Os que não suportam são registrados no output `tagging_exceptions` do Pulumi.
@@ -197,7 +212,7 @@ Os que não suportam são registrados no output `tagging_exceptions` do Pulumi.
 
 - **Pulumi (Python)** — IaC, backend local, stack `prod`
 - **Docker** — build ARM64 do container do AgentCore
-- **pytest + Hypothesis** — 738 testes (unidade, propriedades, integração)
+- **pytest + Hypothesis** — 769 testes (unidade, propriedades, integração)
 - **React + Vite** — painel do acervo (`frontend/`)
 - **PyMuPDF (fitz) + Pillow** — detecção de PDF sem texto e OCR
 
@@ -296,7 +311,9 @@ confira o formato antes de procurar bug.
   de subir um lote, compare os hashes (`ETag`) com o que já está no bucket.
 - **Diagramação de PDF atrapalha a busca.** PDFs de folheto quebram palavras
   com hífen ("servi - dor"). A transcrição limpa ajuda pouco no ranking, mas
-  permite marcar cada seção com fonte e ano (`docs/ocr/cartilha-siass-ifs-2024.md`).
+  permite marcar cada seção com fonte e ano (indexada como
+  `cliente/SIASS/Cartilha_SIASS_IFS_2024.md`; cópia local, fora do git, em
+  `docs/ocr/`).
 - **Em aberto: menos trechos que o pedido.** Nas perguntas de saúde, o
   `Retrieve` devolve 2 trechos quando se pedem 5 (13–15 quando se pedem 30); em
   outros assuntos vêm os 5. **Não** são vetores órfãos: o índice foi auditado
@@ -381,43 +398,185 @@ mensagem — com ele cada turno viraria uma conversa nova).
 **Custo:** ~0,6 s por pergunta, todo do lado do Bedrock (ele reformula a
 pergunta com o histórico antes de buscar). O `ConversationStore` custa 0,08 s.
 
-### 5.4 API do site
+### 5.4 API do site (referência)
+
+A API está publicada e funcionando, mas **não foi integrada ao site do IFS**: o
+foco do projeto foi o WhatsApp. O guia para fazer a integração está em §5.5.
 
 `POST https://57hy9et9yh.execute-api.us-east-1.amazonaws.com/prod/message`
 
 | Header | Conteúdo |
 |---|---|
-| `Authorization` | **ID token** do Cognito (validado pelo authorizer) |
-| `x-access-token` | **Access token** (validado pelo handler via `get_user`) |
+| `Authorization` | **ID token** do Cognito (validado pelo authorizer do API Gateway) |
+| `x-access-token` | **Access token** do mesmo login (validado pela Lambda via `get_user`) |
+| `Content-Type` | `application/json` |
 
-Corpo: `{"message": "...", "sessionId": "..."}` (1–4000 caracteres).
-Resposta de sucesso: `{"status": "ok", "content": "..."}`; erro:
-`{"status": "error", "error": {"code": "invalid_request|unauthenticated|agent_unavailable", "message": "..."}}`
-(HTTP 400, 401 e 503).
+Corpo:
 
-> **Lacunas antes da integração com o site:** o `not_found` volta como sucesso
-> com `content` vazio (o site não distingue "sem resposta"), e a resposta não
-> traz as fontes nem os contatos dos setores. Documento para o cliente decidir a
-> autenticação: "Integração do Assistente PROGEP ao site do IFS" (Claude Docs).
+```json
+{"message": "Como solicito licença capacitação?", "sessionId": "3f6c1e9a-…"}
+```
+
+- `message`: texto de 1 a 4.000 caracteres (só texto);
+- `sessionId`: identificador da conversa, escolhido por quem chama. Repetido
+  nas perguntas seguintes, dá ao assistente o contexto da conversa por 20
+  minutos ("e para docentes?"). Sem ele, cada pergunta é independente.
+
+| Situação | HTTP | Corpo |
+|---|---|---|
+| Resposta | 200 | `{"status": "ok", "content": "texto da resposta"}` |
+| Sem resposta nos documentos | 200 | `{"status": "ok", "content": ""}` (ver §5.5, passo 5) |
+| Pedido inválido (sem `message`, vazio, longo demais) | 400 | `{"status": "error", "error": {"code": "invalid_request", "message": "…"}}` |
+| Token ausente, inválido ou vencido | 401 | `{"status": "error", "error": {"code": "unauthenticated", …}}` |
+| Assistente indisponível ou sem resposta em 30 s | 503 | `{"status": "error", "error": {"code": "agent_unavailable", …}}` |
+| O API Gateway desistiu antes da Lambda (29 s) | 504 | corpo do API Gateway |
 
 **CORS:** o `POST` usa integração Lambda-proxy, então os cabeçalhos vêm da
 função (`CORS_ALLOW_ORIGIN`). Há ainda um método `OPTIONS` (MOCK) para o
 preflight e **gateway responses** para `UNAUTHORIZED`/`ACCESS_DENIED` — sem
-elas o navegador veria falha de CORS em vez do 401 legítimo.
+elas o navegador veria falha de CORS em vez do 401 legítimo. Hoje a origem
+permitida é `*`; restrinja ao domínio do site antes de abrir ao público:
 
-Em produção, restrinja a origem:
 ```bash
 pulumi config set progep-ifs:corsAllowOrigin https://www.ifs.edu.br
 ```
 
-### 5.5 Monitoramento
+### 5.5 Guia de integração com o site
+
+Passos para a equipe do site do IFS colocar o assistente numa página. O
+assistente que responde é o mesmo do WhatsApp: mesma base, mesmo modelo, mesma
+regra de não inventar.
+
+**1. Escolher o modelo de acesso.**
+
+| Modelo | Como funciona | Quando usar |
+|---|---|---|
+| **A. Pelo servidor do site** (recomendado) | O navegador conversa só com o servidor do site; o servidor do site faz login no Cognito com um **usuário técnico** e chama a API | Chat aberto a qualquer visitante da página |
+| B. Direto do navegador | Cada pessoa tem usuário no Cognito, faz login na página e o navegador chama a API com os próprios tokens | Área restrita, com login dos servidores |
+
+No modelo A a senha do usuário técnico fica só no servidor do site, nunca no
+navegador. No modelo B cada servidor precisaria de uma conta no Cognito; o
+caminho natural seria ligar o Cognito ao login institucional do IFS (federação
+SAML ou OIDC), que o projeto não configurou.
+
+**2. Pedir o usuário técnico** (modelo A). A DNX — ou quem administrar a conta
+— cria o usuário **fora** do grupo `administradores`, então ele chama a API
+mas não entra no painel do acervo:
+
+```bash
+aws cognito-idp admin-create-user --user-pool-id us-east-1_3YNaD3UOP --username site-ifs --message-action SUPPRESS --profile ifs
+aws cognito-idp admin-set-user-password --user-pool-id us-east-1_3YNaD3UOP --username site-ifs --password '<senha forte>' --permanent --profile ifs
+```
+
+A senha vai para o cofre de segredos do servidor do site, nunca para o
+código-fonte nem para o navegador.
+
+**3. Obter os tokens.** Login com usuário e senha no app client
+`4c21pvac1ma1a932m8fdqh7uum` (sem segredo de cliente), região `us-east-1`:
+
+```bash
+aws cognito-idp initiate-auth --client-id 4c21pvac1ma1a932m8fdqh7uum --auth-flow USER_PASSWORD_AUTH --auth-parameters USERNAME=site-ifs,PASSWORD='<senha>' --region us-east-1
+```
+
+A resposta traz `IdToken`, `AccessToken` (válidos por **1 hora**) e
+`RefreshToken` (válido por **30 dias**). O servidor do site guarda os três em
+memória e, perto de vencer, renova sem a senha:
+
+```bash
+aws cognito-idp initiate-auth --client-id 4c21pvac1ma1a932m8fdqh7uum --auth-flow REFRESH_TOKEN_AUTH --auth-parameters REFRESH_TOKEN='<refresh token>' --region us-east-1
+```
+
+Qualquer SDK da AWS faz o mesmo (`InitiateAuth` no Cognito Identity Provider);
+em JavaScript também há a biblioteca `amazon-cognito-identity-js`, a mesma que
+o painel do acervo usa (`frontend/src/autenticacao.ts`).
+
+**4. Chamar a API.** Exemplo do servidor do site, em Node.js:
+
+```javascript
+const resposta = await fetch(
+  "https://57hy9et9yh.execute-api.us-east-1.amazonaws.com/prod/message",
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: tokens.IdToken,
+      "x-access-token": tokens.AccessToken,
+    },
+    body: JSON.stringify({ message: pergunta, sessionId: conversaId }),
+    signal: AbortSignal.timeout(35_000),
+  },
+);
+const corpo = await resposta.json();
+```
+
+O `sessionId` deve ser **um identificador aleatório por conversa** (um UUID
+gerado quando o visitante abre o chat), repetido nas perguntas seguintes.
+Nunca use CPF, e-mail ou outro dado pessoal como `sessionId`: ele fica
+gravado nos registros técnicos.
+
+**5. Tratar a resposta.**
+
+- `200` com `content` preenchido: mostrar o texto. Ele vem em português, em
+  parágrafos curtos, às vezes com listas.
+- `200` com `content` vazio: o assistente **não encontrou** a resposta nos
+  documentos. Mostrar uma mensagem própria, por exemplo: "Não encontrei essa
+  informação nos documentos da PROGEP. Fale com a PROGEP: progep@ifs.edu.br,
+  (79) 3711-1443." (contatos completos em `src/domain/contatos.py`).
+- `401`: renovar os tokens (passo 3) e tentar **uma** vez de novo.
+- `400`: mensagem vazia ou acima de 4.000 caracteres; validar antes de enviar.
+- `503` ou `504`: "O assistente está indisponível no momento, tente de novo em
+  instantes."
+
+**6. Cuidados antes de abrir ao público.**
+
+- **Limitar a frequência por visitante** no servidor do site (por exemplo, 10
+  perguntas por minuto por IP): cada pergunta custa de US$ 0,02 a 0,04 sem as
+  tarifas do WhatsApp (§8.6). Para uma proteção a mais na AWS, um *usage plan*
+  no API Gateway ou uma regra de taxa no AWS WAF.
+- **Restringir o CORS** ao domínio do site (§5.4); no modelo A, o navegador nem
+  precisa chamar a API.
+- **Aviso de privacidade** no chat: pedir que o visitante não informe CPF,
+  matrícula ou dados de saúde, como no WhatsApp.
+- **Só texto**, até 4.000 caracteres.
+
+**7. Melhorias recomendadas na API** (para o site oferecer o mesmo que o
+WhatsApp). Hoje a API devolve só o texto; o resultado do agente já traz o
+necessário, falta repassar. Em `src/adapters/api_handler.py`, a última linha de
+`handler` (`build_response(content=agent_response.content)`) recebe um
+`AgentResponse` com `status` (`answered`/`not_found`), `sources` (documentos
+usados) e `setores` (setor indicado quando não há resposta). O WhatsApp monta
+isso em `lambda_entry._whatsapp_reply_text`, com `formatar_fontes`
+(`src/domain/fontes.py`) e `formatar_contato` (`src/domain/contatos.py`).
+Sugestão de corpo:
+
+```json
+{"status": "ok", "resultado": "not_found", "content": "",
+ "fontes": [], "contato": "DAP — dap.progep@ifs.edu.br, (79) 3711-…"}
+```
+
+Mudar o envelope exige atualizar `ApiResponse` (`src/domain/api.py`) e os
+testes de propriedade do envelope (`tests/property/test_p16_response_envelope.py`).
+
+**8. Testar.** Com os tokens do passo 3:
+
+```bash
+curl -X POST "https://57hy9et9yh.execute-api.us-east-1.amazonaws.com/prod/message" -H "Content-Type: application/json" -H "Authorization: <IdToken>" -H "x-access-token: <AccessToken>" -d '{"message": "Quantos dias de férias o servidor tem?", "sessionId": "teste-1"}'
+```
+
+O uso pelo site aparece na aba "Custos" do painel junto com o do WhatsApp
+(itens do assistente e "API do site e do painel").
+
+### 5.6 Monitoramento
 
 - **Tokens:** o `RetrieveAndGenerate` não devolve contagem. A fonte é o *model
   invocation logging* do Bedrock, no log group
   `/progep-ifs/bedrock/model-invocations`; dois metric filters extraem
   `InputTokens` e `OutputTokens` para o namespace `PROGEP-IFS/Bedrock`.
 - **Respostas e falhas:** `MonitorAdapter` emite `Responses`/`ResponseLength`
-  por sessão e `LlmCallFailures` em falha, com retry ≤3.
+  e `LlmCallFailures` em falha, com retry ≤3. Desde 03/10/2026 as métricas saem
+  **sem dimensão** (antes havia uma série por sessão, cobrada por hora); a
+  sessão fica na linha de log, com o telefone mascarado.
+- **Custos:** aba "Custos" do painel (§8.6).
 - **Latência:** cada invocação do runtime grava uma linha `[tempo]` com a
   decomposição (adapter / agente / monitor / total) e se o container foi
   reaproveitado.
@@ -426,10 +585,9 @@ pulumi config set progep-ifs:corsAllowOrigin https://www.ifs.edu.br
 
 ## 6. Transbordo para atendimento humano
 
-> **Estado: ponte WhatsApp ↔ Connect validada em 22/09/2026** no número do IFS
+> **Ponte WhatsApp ↔ Connect validada em 22/09/2026** no número do IFS
 > (+55 79 3711-1496): oferta, "sim", chat na fila, entrada do atendente,
-> mensagens nos dois sentidos e aviso de fim enviado uma única vez. Há um
-> atendente de teste; a PROGEP ainda precisa designar quem atende (§6.5).
+> mensagens nos dois sentidos e aviso de fim enviado uma única vez.
 
 ### 6.1 O que existe
 
@@ -479,8 +637,9 @@ anotação de billing), **só nos `not_found`**, feita no runtime e devolvida no
 campo `setores`. Os assuntos de cada setor vêm do "Setor responsável" dos
 fluxogramas (`docs/fluxos`): DAP 33 processos, DNAGS 31, DSDPES 25, PGD 4. Os
 contatos ficam em `src/domain/contatos.py` — trocar um ramal é editar só ali.
-Pendentes com o cliente: assuntos da CPSPP (nenhum fluxo a cita) e se as
-coordenadorias têm contato próprio.
+A CPSPP não aparece em nenhum fluxo; os assuntos dela no classificador vêm
+do nome do setor. Se as coordenadorias ganharem contato próprio, basta
+acrescentá-las ao catálogo.
 
 Regras (`src/domain/transbordo.py`):
 
@@ -494,22 +653,22 @@ Regras (`src/domain/transbordo.py`):
 
 ### 6.3 Desenho do fluxo
 
-Saudação → captura da pergunta → grava em atributo do contato → invoca a
-Lambda (que chama o AgentCore Runtime) → compara `status`:
-
-- `answered` → entrega a resposta e volta a ouvir;
-- qualquer outro status, ou falha da Lambda → avisa o usuário e **transfere
-  para a fila humana**.
+O contact flow `progep-ifs-transbordo-whatsapp` **só enfileira**: define a fila
+humana da PROGEP e transfere. Não chama o assistente (quem pediu uma pessoa já
+conversou com ele) e não manda mensagem — o que o fluxo escreve chega pelo
+streaming com papel `SYSTEM`, em inglês, e a ponte descarta; os avisos ao
+servidor saem da Lambda.
 
 O JSON do fluxo é **gerado por código** (`src/infra/connect_flow.py`), não
-desenhado no console — reprodutível e auditável (Req 9.1).
+desenhado no console — reprodutível e auditável (Req 9.1). Até 02/10/2026
+existia também o fluxo `assistente-progep` do desenho original (§7.5).
 
 > Pegadinhas do schema do Connect já tratadas: todo `Transitions` precisa de
 > `Errors` **e** `Conditions`; `TransferContactToQueue` não aceita
-> `Parameters`; `GetParticipantInput` exige `InputValidation` e rejeita o
-> ErrorType `InputTimeLimitExceeded`. O erro do provider vem vazio — use
-> `aws connect create-contact-flow --cli-error-format json` para ver o campo
-> `problems`.
+> `Parameters`. Num fluxo com captura de entrada, `GetParticipantInput` exige
+> `InputValidation` e rejeita o ErrorType `InputTimeLimitExceeded`. O erro do
+> provider vem vazio — use `aws connect create-contact-flow
+> --cli-error-format json` para ver o campo `problems`.
 
 ### 6.4 Mudança de arquitetura do canal WhatsApp (decidida em 11/09/2026)
 
@@ -593,93 +752,74 @@ mandamos à Graph API. Consequências: o indicador de "digitando" continua
 funcionando (é o mesmo payload), e o access token, o app secret e a validação
 de assinatura HMAC **deixam de existir**, porque a AWS passa a autenticar.
 
-### 6.5 O que falta
+### 6.5 Como funciona a ponte WhatsApp ↔ Connect
 
-1. **Caminho do End User Messaging: ligado e validado em 14/09/2026; em
-   produção no número do IFS desde 22/09/2026.** Guia atual em §7; o texto
-   abaixo é o registro da migração (§6.4),
-   com o número `+1 555-379-4876` — cortesia, agente e fontes chegando pelo
-   WhatsApp. O webhook interino foi removido em 02/10/2026 (§7.5). Componentes:
-   - entrada: `lambda_entry.whatsapp_social_handler` (Lambda
-     `progep-ifs-whatsapp-social`, assinada no tópico
-     `progep-ifs-whatsapp-inbound`);
-   - envio: `src/adapters/whatsapp_social.py`;
-   - atendimento: `lambda_entry.processar_mensagens_whatsapp`.
+```
+servidor → WhatsApp → SNS → Lambda whatsapp-social ─ SendMessage → chat do Connect
+atendente → chat do Connect ─ streaming → SNS → Lambda connect-chat-stream → WhatsApp
+```
 
-   Passos no console, **nesta ordem**, porque o canal atual cai no momento do
-   vínculo:
-   1. `pulumi up` e anotar o output `whatsapp_inbound_topic_arn`;
-   2. End User Messaging Social → *Add WhatsApp business account* → login com
-      Facebook → escolher a WABA;
-   3. na WABA, *Event destination* → Amazon SNS → colar o ARN do passo 1;
-   4. mandar mensagem para o número e conferir o log da Lambda
-      `progep-ifs-whatsapp-social`;
-   5. só depois de funcionar, remover o caminho anterior.
-2. ~~Definir horário real de atendimento~~ — seg–sex, 9h–18h, aplicado na
-   Lambda (§6.2). O horário `progep-ifs-24x7` da fila ficou como estava: nenhum
-   bloco do fluxo o consulta, e quem decide oferecer é a Lambda.
-3. Fora do horário o servidor recebe o **contato do setor** (§6.2), sem oferta
-   de atendente.
-4. Definir **quem** atende pela PROGEP. Atendentes hoje: `julia.schaedler`
-   (DNX, Admin + Agent) e `jonatha.alves` (IFS, Agent, criado em 28/09/2026). A
-   PROGEP disse que provavelmente usará pouco o transbordo — decisão de manter
-   ligado na próxima reunião; para desligar, basta a Lambda não receber as
-   variáveis `CONNECT_*` (a ponte vira `None` e só os contatos são enviados).
-5. **Transbordo no caminho novo — implementado em 14/09/2026, validado em
-   22/09/2026.** O `connect_router.py` antigo abria o contato mas não fazia
-   ponte; foi substituído por `src/adapters/connect_chat.py`.
+Componentes: `lambda_entry.whatsapp_social_handler` (entrada),
+`lambda_entry.processar_mensagens_whatsapp` (atendimento e oferta),
+`src/adapters/connect_chat.py` (abertura do chat e envio ao atendente) e
+`lambda_entry.connect_chat_stream_handler` (volta do atendente).
 
-   ```
-   servidor → WhatsApp → SNS → Lambda whatsapp-social ─ SendMessage → chat do Connect
-   atendente → chat do Connect ─ streaming → SNS → Lambda connect-chat-stream → WhatsApp
-   ```
+Estados da conversa (item `conv#whatsapp#<telefone>` da tabela de sessões,
+atributo `transbordo`):
 
-   Estados da conversa (item `conv#whatsapp#<telefone>` da tabela de sessões,
-   atributo `transbordo`):
+| Estado | Quem recebe a mensagem do servidor |
+|---|---|
+| vazio | assistente |
+| `oferecido` | classificador sim/não da oferta de atendente; outra coisa vai ao assistente |
+| `lista` | classificador sim/não da oferta da lista de contatos (pergunta fora da PROGEP) |
+| `humano` | chat do Connect (sem "digitando", sem cortesias) |
 
-   | Estado | Quem recebe a mensagem do servidor |
-   |---|---|
-   | vazio | assistente |
-   | `oferecido` | classificador sim/não; outra coisa vai ao assistente |
-   | `humano` | chat do Connect (sem "digitando", sem cortesias) |
+Ao aceitar, a Lambda chama, **nesta ordem**, `StartChatContact` (fluxo
+`progep-ifs-transbordo-whatsapp`, chat de 24 h), `StartContactStreaming`
+(tópico `progep-ifs-connect-chat-stream`) e `CreateParticipantConnection`;
+depois manda ao chat a pergunta que o assistente não respondeu. O atendente vê
+o servidor como "Servidor WhatsApp (…1234)"; o número completo e a pergunta
+ficam nos atributos do contato. Um índice reverso `atend#<ContactId>` liga o
+contato ao telefone.
 
-   Ao aceitar, a Lambda chama, **nesta ordem**, `StartChatContact` (fluxo
-   `progep-ifs-transbordo-whatsapp`, chat de 24 h), `StartContactStreaming`
-   (tópico `progep-ifs-connect-chat-stream`) e `CreateParticipantConnection`;
-   depois manda ao chat a pergunta que o assistente não respondeu. O atendente
-   vê o servidor como "Servidor WhatsApp (…1234)"; o número completo e a
-   pergunta ficam nos atributos do contato. Um índice reverso
-   `atend#<ContactId>` liga o contato ao telefone.
+Da volta, só quatro coisas chegam ao WhatsApp: fala do atendente, entrada dele
+("👤 Nome, da PROGEP, entrou na conversa"), aviso de anexo que não pode ser
+entregue e fim do atendimento. O eco das mensagens do servidor e as do sistema
+(papel `SYSTEM`, em inglês) são descartados.
 
-   Da volta, só quatro coisas chegam ao WhatsApp: fala do atendente, entrada
-   dele ("👤 Nome, da PROGEP, entrou na conversa"), aviso de anexo que não pode
-   ser entregue e fim do atendimento. O eco das mensagens do servidor e as do
-   sistema (papel `SYSTEM`, em inglês) são descartados.
+Comportamentos tratados:
+- o fim chega em **dois** eventos (`participant.left` do atendente, depois
+  `chat.ended`); a gravação condicional em `contato_id` faz o aviso sair uma
+  vez;
+- o connection token expira antes do chat e é renovado com o participant
+  token. Se nem o renovado é aceito, o chat acabou sem aviso e a mensagem volta
+  ao assistente;
+- a varredura de inatividade **ignora** conversas em estado `humano`;
+- a Participant API não usa IAM — os tokens autorizam, então ficam só no
+  DynamoDB (TTL 48 h) e nunca em log.
 
-   Detalhes que já estão tratados:
-   - o fim chega em **dois** eventos (`participant.left` do atendente, depois
-     `chat.ended`); a gravação condicional em `contato_id` faz o aviso sair uma
-     vez;
-   - o connection token expira antes do chat e é renovado com o participant
-     token. Se nem o renovado é aceito, o chat acabou sem aviso e a mensagem
-     volta ao assistente;
-   - a varredura de inatividade **ignora** conversas em estado `humano`;
-   - a Participant API não usa IAM — os tokens autorizam, então ficam só no
-     DynamoDB (TTL 48 h) e nunca em log.
+**Desligar o transbordo** (ficar só com os contatos dos setores): remova as
+variáveis `CONNECT_INSTANCE_ID`, `CONNECT_TRANSFER_FLOW_ID` e
+`CONNECT_STREAM_TOPIC_ARN` das Lambdas do WhatsApp (`transbordo_env` em
+`src/infra/resources.py`) e rode `pulumi up`. Sem elas a ponte não é criada e o
+"não encontrei" leva só o contato do setor.
 
-   **Como testar** (dentro do expediente, com o CCP aberto e o status
-   *Available*):
-   1. mandar uma pergunta fora do escopo ("qual o cardápio do restaurante?") →
-      deve vir a oferta;
-   2. responder "sim" → "Transferi sua conversa…"; o chat aparece no CCP com a
-      pergunta;
-   3. aceitar no CCP → "👤 Nome, da PROGEP, entrou na conversa" no WhatsApp;
-   4. conversar nos dois sentidos;
-   5. encerrar no CCP → "O atendimento com a PROGEP foi encerrado" **uma vez**;
-   6. mandar uma pergunta nova → o assistente volta a responder.
+**Como testar** (dentro do expediente, com o painel do atendente aberto e o
+status *Available*):
+1. mandar uma pergunta da PROGEP que a base não responde ("meu pedido de
+   remoção para o campus Lagarto já foi analisado?") → deve vir o contato do
+   setor e a oferta de atendente;
+2. responder "sim" → "Transferi sua conversa…"; o chat aparece no painel com a
+   pergunta;
+3. aceitar → "👤 Nome, da PROGEP, entrou na conversa" no WhatsApp;
+4. conversar nos dois sentidos;
+5. encerrar → "O atendimento com a PROGEP foi encerrado" **uma vez**;
+6. mandar uma pergunta nova → o assistente volta a responder.
 
-   Variações: responder "não" (recusa sem chamar o assistente); responder com
-   outra pergunta (a oferta é descartada); testar fora do expediente.
+Variações: responder "não" (recusa sem chamar o assistente); responder com
+outra pergunta (a oferta é descartada); testar fora do expediente (só o
+contato); perguntar algo fora da gestão de pessoas ("qual o cardápio do
+restaurante?") → oferta da lista de contatos, sem atendente.
 
 ### 6.6 Criar atendentes
 
@@ -721,7 +861,7 @@ quem autentica é a AWS. O histórico da decisão está em §6.4.
 |---|---|---|---|
 | **+55 79 3711-1496** | Produção | "IFS - PROGEP" (Meta `1383291770109148`), portfólio **IFS - DTI** (empresa verificada, limite 2.000) | AWS WABA `waba-8e94ffc153c4419d8e4d5aa76f53a315`; AWS número `phone-number-id-1090405d46ea49eeac373888a23ade70`; Meta número `1277914255409615` |
 | +1 555-379-4876 | Teste (número virtual 555) | "Projeto dev" (Meta `1718007719797905`), portfólio da DNX (não verificado) | AWS WABA `waba-d67d85459cd845d195a78da19a4a2d2a`; Meta número `1319875041208726` |
-| +1 555 176-1308 | Legado (webhook Graph API) | "Test WhatsApp Business Account" | — |
+| +1 555 176-1308 | Desativado (webhook removido em 02/10/2026, §7.5) | "Test WhatsApp Business Account" | — |
 
 A conta AWS é **compartilhada** com os projetos `den` e `diae` do IFS. No
 embedded signup aparecem números de outros projetos (ex.: "DNX lab" +1
@@ -771,14 +911,14 @@ o nome **só entra em uso após registrar o número de novo**:
 4. Limite: **10 registros por número a cada 72 h** (erro 133016 bloqueia por 3
    dias). Nunca use `deregister`.
 
-> **Pendente (29/09/2026):** "IFS - Progep" aprovado para o número de produção,
-> mas o registro não foi feito — o token do Explorer enxerga a conta
-> `1383291770109148` e **não** os números dela (`phone_numbers` vazio; `GET` no
-> número dá erro 100/33), mesmo com acesso total ao portfólio. A conta é de outra
-> empresa (IFS) que não a dona do app (DNX). Tentar, nesta ordem: adicionar a
-> permissão `business_management`; atribuir a pessoa ao ativo "IFS - PROGEP"
-> com controle total; ou o administrador do IFS (`dti@ifs.edu.br`) fazer o
-> registro.
+> **Número de produção.** O nome "IFS - Progep" foi aprovado pela Meta em
+> 29/09/2026 para o +55 79 3711-1496. O número pertence ao portfólio do IFS, e
+> o app do Explorer é da DNX: nesse caso o token pode enxergar a conta
+> `1383291770109148` mas **não** os números dela (`phone_numbers` vazio; `GET`
+> no número dá erro 100/33), mesmo com acesso total ao portfólio. Para fazer o
+> registro, nesta ordem: incluir a permissão `business_management` no token;
+> atribuir a pessoa ao ativo "IFS - PROGEP" com controle total; ou pedir ao
+> administrador do portfólio do IFS (`dti@ifs.edu.br`) que faça o `register`.
 
 **Números 555 (virtuais):** só enviam com nome **aprovado**; sem isso, toda
 mensagem é recusada com **131037**, mesmo com `name_status:
@@ -842,8 +982,10 @@ mesmo API Gateway do site, rotas `/acervo/*`, com authorizer Cognito e a Lambda
 
 ### 8.1 Acesso
 
-Só usuários do grupo Cognito **`administradores`** alteram o acervo. A inclusão
-no grupo é manual, de propósito: quem mexe no acervo é decisão da PROGEP.
+Só usuários do grupo Cognito **`administradores`** alteram o acervo e veem a
+aba "Custos". A inclusão no grupo é manual, de propósito: quem mexe no acervo é
+decisão da PROGEP. Os pedidos de acesso chegam à DNX, que cria o usuário com os
+comandos abaixo.
 
 ```bash
 aws cognito-idp admin-create-user --user-pool-id us-east-1_3YNaD3UOP --username <email> --user-attributes Name=email,Value=<email> Name=email_verified,Value=true --profile ifs
@@ -908,7 +1050,14 @@ arquivo sobe mas o navegador acusa "Failed to fetch".
 Mostra quanto o assistente gastou hoje, nos últimos 7 e 30 dias e no mês,
 com projeção de fechamento, custo por pergunta, cota grátis da Meta e
 detalhamento por item. Só o grupo `administradores` vê (rota
-`GET /acervo/custos`, mesma Lambda do acervo, que só **lê** a tabela).
+`GET /acervo/custos?periodo=hoje|7d|30d|mes|mes_anterior`, mesma Lambda do
+acervo, que só **lê** a tabela). A tela se atualiza sozinha a cada minuto. A
+explicação para o cliente, item a item, está em
+[custos-assistente-progep.md](custos-assistente-progep.md).
+
+**Projeção do mês:** o gasto até hoje + a média diária dos últimos 30 dias
+fechados × os dias que faltam. Usar só os dias do mês corrente fazia um único
+dia atípico (bateria de testes no dia 1º) virar a projeção do mês inteiro.
 
 **O valor é medido, não estimado:** cada consumo real × preço público
 (`src/domain/custos.py:PRECOS`, conferidos em 02/10/2026). Conferido contra a
@@ -970,7 +1119,7 @@ Limites conhecidos:
 
 ## 9. Testes
 
-**738 testes** automatizados: `python -m pytest`.
+**769 testes** automatizados: `python -m pytest`.
 
 | Camada | O que cobre |
 |---|---|
@@ -1054,9 +1203,18 @@ pulumi up
 stack `prod` "some" — rode `pulumi login --local`.)
 
 O `pulumi up` publica o código de **todas as Lambdas** (WhatsApp, API, painel,
-Ingestor). Mudanças em `agentcore/` ou no agente (`src/adapters/agent.py`,
-prompt, classificação) exigem também o deploy do runtime (§10.5). Rode a suíte
-antes: `python -m pytest tests/unit tests/property`.
+Ingestor, custos). Mudanças em `agentcore/` ou no agente (`src/adapters/agent.py`,
+prompt, classificação, `monitor_adapter.py`) exigem também o deploy do runtime
+(§10.5). Rode a suíte antes: `python -m pytest tests/unit tests/property`.
+
+Se o `up` **criar uma Lambda nova**, o log group dela nasce sem prazo de
+retenção. Depois do primeiro uso, rode:
+
+```bash
+python scripts/retencao_logs.py
+```
+
+Mudanças em `frontend/` não vão pelo Pulumi: publique o painel (§8.4).
 
 ### 10.4 Ingestão
 
@@ -1088,7 +1246,23 @@ Confira a versão nova: `aws bedrock-agentcore-control get-agent-runtime
 `agentRuntimeVersion` incrementada. O aviso
 `UpdateTraceSegmentDestination ... already set to CloudWatchLogs` é esperado.
 
-### 10.6 Antes de mexer no prompt
+### 10.6 Controle de custos
+
+Configuração (uma vez; já aplicada em produção):
+
+```bash
+pulumi config set progep-ifs:custosEquipeTecnica <e-mail1>,<e-mail2>
+```
+
+Ao mudar um preço (AWS ou Meta), edite `PRECOS`/`PRECO_MODELOS` em
+`src/domain/custos.py` e rode `pulumi up`. Para recalcular o histórico com o
+preço novo: os itens de métrica são recalculados pelo
+`custos_retroativo.py`; os de evento (tokens, mensagens) não, porque somam —
+antes de reprocessar, apague os itens do mês (`pk = custo#AAAA-MM`) **e** as
+marcas de evento (`pk` começando com `marca#`, que vivem 3 dias); sem apagar as
+marcas, os eventos desses 3 dias são pulados como "já contados".
+
+### 10.7 Antes de mexer no prompt
 
 O prompt (`GENERATION_PROMPT_TEMPLATE`) já oscilou com mudanças pequenas.
 Sempre: rode as três baterias (§9.1) **antes e depois**, compare, e teste
@@ -1119,7 +1293,8 @@ localmente o caso que motivou a mudança (os scripts de comparação montam o
 | `Your session has expired` | `aws login --profile ifs`. Scripts longos são retomáveis |
 | Conta errada em `get-caller-identity` | O perfil `default` já apontou para outro cliente. Use `--profile ifs` |
 | `error: no stack named 'prod' found` | O Pulumi está logado na nuvem (outro projeto). `pulumi login --local` |
-| `pulumi up` avisa "resources are in an unknown state because the Pulumi CLI was interrupted" | Duas `pending_operations` antigas na stack (`connect-hours`, Lambda `progep-ifs-connect`), não do deploy atual. Não bloqueiam; limpar com `pulumi stack export/import` quando houver janela |
+| `pulumi up` avisa "resources are in an unknown state because the Pulumi CLI was interrupted" | `pending_operations` antigas na stack (`connect-hours`; a outra era da Lambda `progep-ifs-connect`, removida em 02/10/2026), não do deploy atual. Não bloqueiam; limpar com `pulumi stack export/import` quando houver janela |
+| `docker login` no ECR: `500 Internal Server Error ... dockerDesktopLinuxEngine` | O motor do Docker Desktop travou, mesmo com o programa aberto. Reinicie o Docker Desktop (Quit e abrir de novo) |
 | `deploy_agentcore.ps1` falha logo no build com `NativeCommandError` | Rodado com `*>` ou `2>&1`. Rode sem redirecionamento |
 | `failed to load checkpoint: EOF` no Pulumi | `prod.json.attrs` zerou após interrupção. Copie `prod.json.bak.attrs` por cima (valide o md5) e apague o `.tmp` órfão |
 | Recurso existe na AWS mas não no estado | `pulumi import` + `pulumi state unprotect` |
@@ -1151,73 +1326,83 @@ localmente o caso que motivou a mudança (os scripts de comparação montam o
 
 | Sintoma | Causa e correção |
 |---|---|
-| `code 190 Session has expired` | Token temporário (24 h). Use System User token permanente |
-| Envio falha para número brasileiro | O `wa_id` vem **sem o 9** do celular. Cadastre o destinatário sem o 9 |
-| Mensagem chega mas não há resposta | O app precisa estar em `subscribed_apps` do WABA |
-| Trocou o token e continua falhando | A Lambda cacheia o segredo por container. Recicle com `aws lambda update-function-configuration --description ...` |
+| `code 190 Session has expired` na Graph API (diagnóstico, §7.6) | Token temporário (24 h). Use o token de System User do segredo `progep-ifs/whatsapp` |
 | Encerramento por inatividade não chega, sem erro na Lambda de encerramento | A AWS **aceitou** o envio (`closed=True`), mas a Meta recusou depois. Procure `[entrega] FALHOU` no log da `progep-ifs-whatsapp-social`. Em 15/09/2026 foi `131037 — number needs display name approval`. **Regra dos números 555 gerados pela Meta:** exigem nome de exibição **aprovado** para enviar, mesmo com `name_status: AVAILABLE_WITHOUT_REVIEW` (o status que a Graph API mostra, e que para número próprio bastaria). "Projeto dev" nunca foi enviado para análise. Nas primeiras horas as respostas saíram; no dia seguinte, tudo passou a ser recusado. Corrige-se no WhatsApp Manager → Números de telefone → Perfil → Nome de exibição → Editar; o andamento aparece em `new_name_status` (Graph API, `GET /{meta-phone-number-id}?fields=name_status,new_name_status`) |
 | Assistente responde a uma mensagem antiga, fora de hora (ex.: cortesia e oferta de atendente depois do atendimento encerrado) | Entrega repetida: o caminho Meta → End User Messaging → SNS entrega **pelo menos uma vez**. Em 25/09/2026 duas mensagens do atendimento humano voltaram ~2 min depois (sem erro, sem throttle e sem reentrega do SNS — publicações = entregas = execuções). Corrigido com marca por `message_id` (`msg#<wamid>` na tabela de sessões, gravação condicional, TTL 24 h); a entrada agora é logada como `[entrada] msg=…` |
 | Procurou o status no log e não achou | O status da Meta chega **segundos depois do envio**, antes de o comando que disparou o envio retornar. Comece a janela do filtro antes do disparo |
 | "Digitando…" aparece e a resposta nunca chega | Destino sem `+` (recusado pela AWS) ou recusa da Meta (131037 etc.). Veja `[entrega]` no log |
 | Resposta "temporariamente indisponível" | Falha na chamada ao runtime. Procure `[falha]` no log do runtime (`/aws/bedrock-agentcore/runtimes/progep_ifs_agent-07SkZL6Kh5-DEFAULT`) |
-| Graph API: `Object with ID ... does not exist ... (100/33)` | O token não tem acesso ao objeto. Gere de novo marcando a conta do WhatsApp; para conta de outra empresa, ver pendência em §7.3. Não conta nas 10 tentativas de registro |
+| Graph API: `Object with ID ... does not exist ... (100/33)` | O token não tem acesso ao objeto. Gere de novo marcando a conta do WhatsApp; para conta de outra empresa, ver §7.3. Não conta nas 10 tentativas de registro |
 | Setor indicado errado no "não encontrei" | Classificação do runtime: log `[setor] setores=…`. Ajuste os assuntos em `src/domain/contatos.py` e redeploy do runtime |
 | Oferta de atendente não aparece | Fora do expediente (seg–sex 9h–18h, UTC−3), pergunta classificada como fora da PROGEP, ou Lambda sem as variáveis `CONNECT_*` |
 
+### Aba "Custos"
+
+| Sintoma | Causa e correção |
+|---|---|
+| "Hoje" mostra perguntas = 0 logo depois de uma pergunta | Esperado: perguntas e execução do AgentCore vêm de métricas horárias. O modelo e o WhatsApp aparecem em segundos |
+| Custo do modelo parado | A assinatura do log de invocações caiu ou a Lambda `progep-ifs-custos-logs` falhou. Veja o log dela (`[custos] grupo=… {…}`) e `aws logs describe-subscription-filters --log-group-name /progep-ifs/bedrock/model-invocations` |
+| Modelo novo com custo zero | Falta o preço em `PRECO_MODELOS`; o log da `custos-logs` avisa `Modelo sem preço cadastrado` |
+| Medido ≠ faturado na conferência | Último dia da fatura incompleto (fica de fora) ou virada de dia UTC × UTC−3. Diferença persistente em vários dias = preço desatualizado em `PRECOS` |
+| Uso de outro projeto aparecendo | A atribuição é pela identidade do log de invocações (`custos.item_da_invocacao`). Confira se a role ou o e-mail em `custosEquipeTecnica` não são compartilhados |
+
 ---
 
-## 12. Próximos passos
+## 12. Evoluções possíveis
 
-### Em andamento (29–30/09/2026)
+O projeto foi entregue com o canal WhatsApp em produção. As sugestões abaixo
+são para quem continuar a evoluí-lo.
 
-1. **Nome "IFS - Progep" no número de produção** — aprovado; falta registrar o
-   número de novo (§7.3, pendência de permissão).
-2. **Retorno do SIASS** — assistente usava o Manual de Perícia 2017 em vez da
-   Cartilha SIASS 2024. Feito: 3 cópias do manual removidas, transcrição da
-   cartilha indexada. **Não publicado:** duas regras no prompt (preferir o
-   documento mais recente/do IFS; ao ser contestado, não acrescentar nada que
-   não esteja nos trechos — o modelo inventou "remuneração reduzida à metade"
-   numa contestação). Falta: teste local do prompt, investigar por que as
-   perguntas de saúde recebem só 2 trechos (§4.4), baterias antes/depois.
-   Decisão do cliente: manter ou retirar o manual de 2017.
-3. **Remover o webhook legado** (§7.5).
-4. ~~Custo evitável da trilha duplicada~~ — **feito em 02/10/2026**: a
-   `progep-ifs-trail` continua criada, com o registro **desligado**
-   (`progep-ifs:trilhaPropria`, padrão `false`); a trilha `dnx` da organização
-   cobre a conta. Religar se a conta sair da organização da DNX:
-   `pulumi config set progep-ifs:trilhaPropria true` + `pulumi up`.
+### Ajustes já preparados (uma configuração)
 
-### Pendências com o cliente
-
-5. Quem atende pelo Connect, e se o transbordo continua ligado.
-6. Assuntos da CPSPP (nenhum fluxo a cita) e contatos próprios das
-   coordenadorias (`src/domain/contatos.py`).
-7. Autenticação do site (documento "Integração do Assistente PROGEP ao site do
-   IFS"); depois, corrigir as lacunas da API (§5.4) e restringir o CORS.
+- **Religar a trilha própria do CloudTrail** se a conta do IFS sair da
+  organização da DNX, que leva a trilha `dnx` junto:
+  `pulumi config set progep-ifs:trilhaPropria true` e `pulumi up`.
+- **Isenção da Meta para órgão público** (mensagens de serviço acima de 1.000
+  por mês): se a Meta confirmar a isenção do IFS, ligue
+  `progep-ifs:custosMetaIsento` (§8.6) para a aba "Custos" deixar de cobrar essa
+  tarifa.
 
 ### Qualidade das respostas
 
-8. **FAQ dos setores** — é o que resolve o descasamento de vocabulário (§4.4) e
+1. **FAQ dos setores** — é o que resolve o descasamento de vocabulário (§4.4) e
    cobre o "onde protocolo e que documento anexo", que a legislação não traz.
-9. **Validação das transcrições** pela PROGEP — priorizar os 10 fluxos mais
-   consultados, não os 94.
-10. **Definir escopo** — decidir se o assistente deve responder sobre licitações
-    (a Lei 14.133 está no corpus).
-11. **Processo de atualização** — com o painel (§8), a PROGEP mantém o acervo;
-    falta combinar quem remove a versão antiga quando sai norma nova.
+2. **Validação das transcrições** dos fluxogramas pela PROGEP, começando pelos
+   10 fluxos mais consultados.
+3. **Escopo** — o corpus inclui a Lei 14.133 (licitações), e o assistente
+   responde sobre compras; retirar o documento se isso não for desejado.
+4. **Atualização do acervo** — ao publicar norma nova pelo painel (§8), remover
+   a versão antiga, para as duas não competirem na busca.
+5. **Perguntas de saúde com menos trechos** — o `Retrieve` devolve 2 de 5
+   (§4.4); vale investigar antes de mexer em `DEFAULT_MAX_RESULTS`.
 
 ### Técnicas
 
-12. **Encurtar respostas** — a cauda lenta (p90 ~9 s) são as respostas longas.
-13. **Reescrita de pergunta** para vocabulário normativo antes da busca —
-    alternativa técnica ao FAQ, custa uma chamada de LLM.
-14. **OCR no pipeline de ingestão** — hoje é passo manual.
-15. **Limpar as `pending_operations`** antigas da stack Pulumi (§11).
-16. **Subir o moto** para destravar o teste de integração (§9.3).
+6. **Integração com o site** — a API está pronta, mas não foi integrada ao site
+   (o foco foi o WhatsApp). O guia está em §5.5.
+7. **Encurtar respostas** — a cauda lenta (p90 ~9 s) são as respostas longas.
+8. **Reescrita de pergunta** para o vocabulário normativo antes da busca —
+   alternativa técnica ao FAQ; custa uma chamada de LLM.
+9. **OCR no pipeline de ingestão** — hoje é passo manual (`ocr_documentos.py`).
+10. **Limpar as `pending_operations`** antigas da stack Pulumi (§11).
+11. **Subir o moto** para destravar o teste de integração (§9.3).
+12. **Observabilidade das conversas (Langfuse)** — avaliado em 05/10/2026 e
+    não adotado. O guia v2 está sem correções de segurança desde o 1º
+    trimestre de 2025; a versão atual pede Postgres, ClickHouse, Redis e S3 (no
+    mínimo 4 vCPU e 16 GB, ~US$ 130–150/mês self-hosted). Ele calcula só o
+    custo do modelo (não lê a fatura, então não substitui a aba "Custos"), e a
+    chamada principal (`RetrieveAndGenerate`) não devolve tokens. Se voltar à
+    pauta, testar antes o Langfuse Cloud (plano grátis).
 
 ---
 
 ## 13. Changelog
+
+### 2026-10-08
+- **Documentação revisada** (técnica e visão geral) e novo documento de custos
+  para o cliente ([custos-assistente-progep.md](custos-assistente-progep.md)),
+  com o acesso à aba "Custos".
+- Langfuse avaliado e não adotado (§12, item 12).
 
 ### 2026-10-02
 - **Aba "Custos" no painel** (§8.6): custo medido em tempo real, só da
@@ -1227,7 +1412,8 @@ localmente o caso que motivou a mudança (os scripts de comparação montam o
 - **Otimizações de custo:** trilha própria do CloudTrail desligada (a da
   organização cobre a conta; era ~US$ 4,30/mês); ciclo de vida no ECR (imagens
   sem tag expiram em 7 dias; eram 55 imagens, 2,9 GB); Monitor de Consumo sem a
-  dimensão `SessionId`. Custo fixo: de US$ 6–7 para cerca de US$ 1–2 por mês.
+  dimensão `SessionId`. Custo fixo: de US$ 6–7 para cerca de US$ 2–3 por mês (incluindo ~US$ 0,80
+  do próprio controle de custos).
 - **Limpeza e privacidade:** removidos o webhook do número de teste e o fluxo
   antigo do Connect (§7.5) e funções sem uso; o telefone de quem conversa vai
   para os logs só com os 4 últimos dígitos (`domain/privacidade.py`); os log

@@ -8,6 +8,8 @@ humano no Amazon Connect e infraestrutura como código em Pulumi (Python).
 > **Documentação**
 > - [docs/visao-geral-assistente-progep.md](docs/visao-geral-assistente-progep.md):
 >   apresentação para o cliente (o que é, como funciona, serviços, custos, painel do acervo).
+> - [docs/custos-assistente-progep.md](docs/custos-assistente-progep.md): custos
+>   item a item e como acompanhar o gasto real na aba "Custos" do painel.
 > - [docs/documentacao-tecnica.md](docs/documentacao-tecnica.md): arquitetura
 >   deployada, serviços, passo a passo de deploy, Meta/WhatsApp, acervo e troubleshooting.
 >

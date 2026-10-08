@@ -35,9 +35,12 @@ frontend/dist/
 docs/ocr/
 docs/faq/
 docs/fluxos/
+escopo.md
+
 
 # Saída do scripts/run_qa_suite.py
 relatorio.md
 
 # Configuração local das ferramentas (Claude Code)
 .claude/
+.kiro/
