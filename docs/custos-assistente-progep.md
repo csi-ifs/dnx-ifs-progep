@@ -16,8 +16,8 @@ geral do assistente está em
   perguntas. Desse total, US$ 5,64 foram infraestrutura fixa, quase toda de um
   registro de auditoria duplicado que já foi desligado (seção 6).
 - **Hoje a parte fixa fica em cerca de US$ 2 a 3 por mês.** O resto acompanha o
-  uso: de US$ 0,03 a 0,05 por pergunta.
-- **Com 1.000 perguntas por mês, o custo previsto fica entre US$ 35 e 60**,
+  uso: de US$ 0,04 a 0,06 por pergunta.
+- **Com 1.000 perguntas por mês, o custo previsto fica entre US$ 45 e 70**,
   incluindo a tarifa da Meta acima da cota grátis.
 - **O gasto real pode ser acompanhado a qualquer momento** na aba "Custos" do
   painel, atualizada poucos minutos depois de cada pergunta.
@@ -96,15 +96,21 @@ A aba agrupa os itens em três partes.
 | WhatsApp: tarifa da Meta | Só acima de 1.000 mensagens entregues no mês (seção 4) | US$ 0,0068 por mensagem |
 | Atendimento humano (Connect) | Cada mensagem trocada no chat com o atendente, nos dois sentidos | US$ 0,01 por mensagem |
 
-**Custo típico por pergunta** (medido em setembro de 2026):
+**Custo típico por pergunta** (medido em setembro de 2026 e ajustado para a
+busca com trechos maiores, em uso desde 10/11/2026):
 
 | Item | Por pergunta |
 |---|---|
-| Modelo Claude | US$ 0,017 |
+| Modelo Claude | US$ 0,028 |
 | Execução do assistente | até US$ 0,02 |
 | Mensagens do WhatsApp (AWS) | US$ 0,011 |
 | Busca nos documentos | menos de US$ 0,001 |
-| **Total** | **US$ 0,03 a 0,05** |
+| **Total** | **US$ 0,04 a 0,06** |
+
+Desde 10/11/2026 a busca entrega ao modelo trechos maiores dos documentos.
+Com isso, uma pergunta e a resposta que estão no mesmo FAQ chegam juntas. O
+modelo lê cerca de quatro vezes mais texto por pergunta, o que acrescenta
+cerca de US$ 0,01 ao custo.
 
 Perguntas que geram respostas longas custam mais que a média; cortesias como
 "bom dia" e "obrigado" não passam pelo modelo e custam só a mensagem.
@@ -173,10 +179,10 @@ por pergunta. O valor real aparece na aba "Custos".
 
 | Perguntas por mês | Uso | Fixo | Tarifa da Meta (sem isenção) | Total |
 |---|---|---|---|---|
-| 500 | US$ 15 a 25 | US$ 2 a 3 | dentro da cota | US$ 17 a 28 |
-| 1.000 | US$ 30 a 50 | US$ 2 a 3 | US$ 3 a 7 | US$ 35 a 60 |
-| 5.000 | US$ 150 a 250 | US$ 2 a 3 | US$ 45 a 60 | US$ 197 a 313 |
-| 10.000 | US$ 300 a 500 | US$ 2 a 3 | US$ 95 a 130 | US$ 397 a 633 |
+| 500 | US$ 20 a 30 | US$ 2 a 3 | dentro da cota | US$ 22 a 33 |
+| 1.000 | US$ 40 a 60 | US$ 2 a 3 | US$ 3 a 7 | US$ 45 a 70 |
+| 5.000 | US$ 200 a 300 | US$ 2 a 3 | US$ 45 a 60 | US$ 247 a 363 |
+| 10.000 | US$ 400 a 600 | US$ 2 a 3 | US$ 95 a 130 | US$ 497 a 733 |
 
 **Atendimento humano:** cobrado só quando usado. Um atendimento típico, de 10 a
 20 mensagens, custa de US$ 0,10 a 0,20, mais as mensagens do WhatsApp. Não há

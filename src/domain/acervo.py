@@ -20,8 +20,11 @@ justamente a limpeza de "documento antigo".
 from __future__ import annotations
 
 import posixpath
+import re
 import unicodedata
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Iterable
 
 from src.domain.config import (
     MAX_DOC_SIZE_BYTES,
@@ -216,6 +219,204 @@ def procedencia(chave: str) -> Procedencia:
     if chave.startswith(f"{DocumentSource.CLIENTE.value}/"):
         return Procedencia("repositório da PROGEP", False, "")
     return Procedencia("desconhecida", False, "")
+
+
+# --- Cópias ---------------------------------------------------------------------
+# Cópia idêntica não é inofensiva: a busca devolve os N pedaços mais parecidos, e
+# dois arquivos iguais ocupam o dobro das vagas com o mesmo texto, empurrando para
+# fora o trecho de outro documento que completaria a resposta.
+
+#: Transcrições de PDFs sem camada de texto. Têm o mesmo nome do PDF **de
+#: propósito** — o PDF entra vazio na base e a transcrição é o que responde —,
+#: então não contam como cópia na listagem de duplicatas.
+PREFIXO_TRANSCRICOES = f"{DocumentSource.CLIENTE.value}/ocr/"
+
+_EXTENSOES = r"\.(pdf|docx?|txt|html?|md)"
+
+
+def nome_base(chave: str) -> str:
+    """Nome comparável entre formatos: sem pasta, extensão, acento nem pontuação.
+
+    ``cliente/DNAGS/FAQ_NAPA.docx`` e ``cliente/painel/FAQ NAPA.pdf`` viram o
+    mesmo ``faq napa``. O sufixo ``(1)`` do navegador e a extensão repetida
+    (``x.docx (1).pdf``) também saem: é assim que chega a cópia baixada duas
+    vezes.
+    """
+    nome = chave.rsplit("/", 1)[-1]
+    nome = unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode()
+    nome = nome.lower()
+    for _ in range(3):  # "x.docx (1).pdf" → "x.docx (1)" → "x.docx" → "x"
+        anterior = nome
+        nome = re.sub(rf"{_EXTENSOES}$", "", nome).strip()
+        nome = re.sub(r"\(\d+\)$", "", nome).strip()
+        if nome == anterior:
+            break
+    return re.sub(r"[^a-z0-9]+", " ", nome).strip()
+
+
+def conteudo_hash(etag: str | None) -> str | None:
+    """MD5 do conteúdo a partir do ETag, ou ``None`` quando o ETag não é o MD5.
+
+    Envio de parte única (o POST pré-assinado, o ``put_object`` dos scripts, a
+    cópia entre buckets) tem ETag igual ao MD5. O de multipart termina em
+    ``-N`` e não serve para comparar conteúdo.
+    """
+    valor = str(etag or "").strip().strip('"').lower()
+    if not valor or "-" in valor:
+        return None
+    return valor
+
+
+@dataclass(frozen=True)
+class Objeto:
+    """O mínimo de um objeto do acervo para comparar: chave e ETag."""
+
+    chave: str
+    etag: str | None = None
+
+
+@dataclass
+class Conflitos:
+    """O que já existe no acervo parecido com o documento que vai entrar."""
+
+    identicos: list[str] = field(default_factory=list)
+    mesmo_nome: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.identicos or self.mesmo_nome)
+
+
+def conflitos_do_envio(
+    nome: str, etag: str | None, acervo: Iterable[Objeto], destino: str
+) -> Conflitos:
+    """Compara o envio com o acervo: mesmo conteúdo e mesmo nome-base.
+
+    O ``destino`` (a chave que o envio vai ocupar) conta como "mesmo nome" se já
+    existir: confirmar sobrescreveria o arquivo anterior, e isso merece a mesma
+    pergunta que um nome parecido em outra pasta.
+    """
+    alvo_hash = conteudo_hash(etag)
+    alvo_nome = nome_base(nome)
+    achados = Conflitos()
+    for obj in acervo:
+        if obj.chave.endswith("/"):
+            continue
+        if alvo_hash and conteudo_hash(obj.etag) == alvo_hash:
+            achados.identicos.append(obj.chave)
+        elif obj.chave == destino or (alvo_nome and nome_base(obj.chave) == alvo_nome):
+            achados.mesmo_nome.append(obj.chave)
+    return achados
+
+
+class ConflitoNoAcervo(Exception):
+    """O envio esbarra em algo que já está no acervo; a tela decide o que fazer."""
+
+    def __init__(self, mensagem: str, conflitos: Conflitos, *, pode_prosseguir: bool):
+        super().__init__(mensagem)
+        self.conflitos = conflitos
+        self.pode_prosseguir = pode_prosseguir
+
+    def como_dict(self) -> dict:
+        return {
+            "erro": str(self),
+            "conflito": "identico" if self.conflitos.identicos else "mesmo_nome",
+            "identicos": self.conflitos.identicos,
+            "mesmo_nome": self.conflitos.mesmo_nome,
+            "pode_prosseguir": self.pode_prosseguir,
+        }
+
+
+#: O que fazer quando o envio tem o mesmo nome de um documento do acervo.
+ACOES_DE_CONFLITO = ("substituir", "manter_ambos")
+
+
+def decidir_conflito(
+    conflitos: Conflitos, acao: object, substituir: object
+) -> list[str]:
+    """Decide se o envio prossegue e devolve as chaves a mandar para a lixeira.
+
+    * cópia idêntica: **não entra**, com ou sem ação — não há versão nova a
+      guardar, só a mesma informação ocupando o dobro das vagas na busca;
+    * mesmo nome, sem ação: pergunta à tela;
+    * ``manter_ambos``: entra sem remover nada;
+    * ``substituir``: entra e as chaves escolhidas vão para a lixeira. Só valem
+      chaves que **estão na lista de conflitos** — a lista vinda da tela não pode
+      virar um jeito de remover qualquer documento do acervo.
+    """
+    if conflitos.identicos:
+        lugares = ", ".join(conflitos.identicos)
+        raise ConflitoNoAcervo(
+            f"Este arquivo já está no acervo, com o mesmo conteúdo: {lugares}. "
+            "Descarte o envio — uma segunda cópia atrapalha a busca.",
+            conflitos,
+            pode_prosseguir=False,
+        )
+    if not conflitos.mesmo_nome:
+        return []
+    if acao is None or acao == "":
+        raise ConflitoNoAcervo(
+            "Já existe no acervo documento com o mesmo nome: "
+            f"{', '.join(conflitos.mesmo_nome)}. É uma versão nova (substituir) "
+            "ou outro documento (manter os dois)?",
+            conflitos,
+            pode_prosseguir=True,
+        )
+    if acao not in ACOES_DE_CONFLITO:
+        raise PedidoInvalido(f"Ação inválida; use uma de: {', '.join(ACOES_DE_CONFLITO)}.")
+    if acao == "manter_ambos":
+        return []
+    escolhidas = substituir if isinstance(substituir, list) else conflitos.mesmo_nome
+    escolhidas = [str(c) for c in escolhidas]
+    fora = [c for c in escolhidas if c not in conflitos.mesmo_nome]
+    if fora:
+        raise PedidoInvalido("Só é possível substituir documentos com o mesmo nome do envio.")
+    if not escolhidas:
+        raise PedidoInvalido("Escolha ao menos um documento para substituir.")
+    return escolhidas
+
+
+def _conta_como_copia(chave: str) -> bool:
+    """Entra na comparação por nome? Site e transcrições ficam de fora.
+
+    As páginas do site repetem nome por natureza (``concursos/2024.html`` e
+    ``remocao-interna/2024.html``; o mesmo "Resultado final" a cada ano), e a
+    transcrição tem o nome do PDF de propósito. Listá-las seria ruído que
+    ensina a ignorar a lista.
+    """
+    return not chave.startswith((f"{DocumentSource.SITE.value}/", PREFIXO_TRANSCRICOES))
+
+
+def grupos_de_duplicatas(acervo: Iterable[Objeto]) -> list[dict]:
+    """Cópias que já estão no acervo, para a aba "Documentos na base".
+
+    * ``identico``: mesmo conteúdo, em qualquer origem — sempre é sobra;
+    * ``mesmo_nome``: conteúdo diferente e mesmo nome-base, só entre documentos
+      curados (repositório e painel). Pode ser versão antiga esquecida ou dois
+      formatos do mesmo texto; quem decide é a PROGEP.
+    """
+    objetos = [o for o in acervo if not o.chave.endswith("/")]
+    por_hash: dict[str, list[str]] = defaultdict(list)
+    for obj in objetos:
+        valor = conteudo_hash(obj.etag)
+        if valor:
+            por_hash[valor].append(obj.chave)
+    grupos = [
+        {"tipo": "identico", "chaves": sorted(chaves)}
+        for chaves in por_hash.values()
+        if len(chaves) > 1
+    ]
+    ja_identicos = {frozenset(g["chaves"]) for g in grupos}
+
+    por_nome: dict[str, list[str]] = defaultdict(list)
+    for obj in objetos:
+        if _conta_como_copia(obj.chave):
+            por_nome[nome_base(obj.chave)].append(obj.chave)
+    grupos += [
+        {"tipo": "mesmo_nome", "chaves": sorted(chaves)}
+        for nome, chaves in por_nome.items()
+        if nome and len(chaves) > 1 and frozenset(chaves) not in ja_identicos
+    ]
+    return sorted(grupos, key=lambda g: (g["tipo"] != "identico", g["chaves"]))
 
 
 def validar_chave_do_acervo(chave: str) -> str:

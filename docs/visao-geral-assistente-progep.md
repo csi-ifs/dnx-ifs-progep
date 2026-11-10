@@ -142,12 +142,17 @@ temporária, trocada no primeiro login.
 - **Enviar um documento novo.** Formatos aceitos: PDF, Word (.docx), texto
   (.txt), HTML e Markdown, com até 50 MB. O documento passa por uma etapa de
   revisão antes de entrar na base; depois de confirmado, o assistente passa a
-  usá-lo em poucos minutos.
+  usá-lo em poucos minutos. Se o arquivo **já estiver na base** com o mesmo
+  conteúdo, o painel avisa onde ele está e não deixa enviar de novo. Se houver
+  documento **com o mesmo nome**, o painel pergunta se é uma versão nova (a
+  anterior vai para a lixeira) ou outro documento (os dois ficam).
 - **Consultar os documentos da base**, com busca por nome.
 - **Remover um documento.** O arquivo vai para uma lixeira e pode ser
   recuperado pela DNX em até 30 dias.
 - **Conferir a base.** Uma verificação mostra documentos que estão no acervo
-  mas não puderam ser lidos pelo assistente.
+  mas não puderam ser lidos pelo assistente. No topo da lista aparecem também
+  as **possíveis cópias** (mesmo conteúdo, ou mesmo nome em formatos
+  diferentes), para decidir qual manter.
 - **Acompanhar os custos** (aba "Custos"). Mostra o gasto de hoje, dos últimos
   7 e 30 dias e do mês, com projeção para o fechamento do mês, custo por
   pergunta e quanto da cota grátis de mensagens da Meta já foi usado. O valor
@@ -175,10 +180,10 @@ O detalhamento completo, item a item, está em
 
 | | Valor |
 |---|---|
-| Custo por pergunta | US$ 0,03 a 0,05 |
+| Custo por pergunta | US$ 0,04 a 0,06 |
 | Custo fixo mensal (existe mesmo sem uso) | cerca de US$ 2 a 3 |
 | Setembro/2026, fase de testes (98 perguntas), medido | US$ 8,17 |
-| Previsão para 1.000 perguntas por mês | US$ 35 a 60 |
+| Previsão para 1.000 perguntas por mês | US$ 45 a 70 |
 | Montagem da base de documentos (uma única vez) | cerca de US$ 6 a 7 |
 | Acrescentar um documento com texto | menos de US$ 0,001 |
 

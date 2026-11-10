@@ -14,10 +14,12 @@ import { useCallback, useEffect, useState } from "react";
 import {
   type Conferencia,
   type DocumentoNaBase,
+  type GrupoDeDuplicatas,
   conferirIndexacao,
   formatarBytes,
   formatarData,
   listarDocumentos,
+  listarDuplicatas,
   removerDocumento,
 } from "../api";
 
@@ -42,14 +44,21 @@ export function Documentos({
   const [conferindo, setConferindo] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
+  // Cópias já no acervo. Vem junto com a listagem (as duas leem só o S3, menos
+  // de 1 s): cópia esquecida só é corrigida se alguém a vir sem procurar.
+  const [duplicatas, setDuplicatas] = useState<GrupoDeDuplicatas[]>([]);
 
   const recarregar = useCallback(async () => {
     setCarregando(true);
     try {
       const token = await obterToken();
-      const r = await listarDocumentos(api, token);
+      const [r, d] = await Promise.all([
+        listarDocumentos(api, token),
+        listarDuplicatas(api, token),
+      ]);
       setItens(r.itens);
       setTruncado(r.truncado);
+      setDuplicatas(d.grupos);
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Falha ao carregar os documentos.");
     } finally {
@@ -77,6 +86,15 @@ export function Documentos({
       // entender que nada aconteceu. O estado da tela passa a refletir o que o
       // servidor já confirmou, não o que a listagem ainda não alcançou.
       setItens((atuais) => atuais.filter((i) => i.chave !== doc.chave));
+      setDuplicatas((grupos) =>
+        grupos
+          .map((g) => ({
+            ...g,
+            chaves: g.chaves.filter((c) => c !== doc.chave),
+            documentos: g.documentos.filter((d) => d.chave !== doc.chave),
+          }))
+          .filter((g) => g.chaves.length > 1),
+      );
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Não foi possível remover.");
     } finally {
@@ -150,6 +168,36 @@ export function Documentos({
         </p>
       )}
       {aviso && <p className="aviso">{aviso}</p>}
+
+      {duplicatas.length > 0 && (
+        <div className="cartao">
+          <h2>Possíveis cópias ({duplicatas.length})</h2>
+          <p className="ajuda">
+            Cópia do mesmo documento atrapalha a busca: as duas ocupam as vagas
+            de trecho que outro documento usaria para completar a resposta.
+            Confira e remova a que sobra na lista abaixo (filtre pelo nome).
+          </p>
+          <ul className="duplicatas">
+            {duplicatas.map((g) => (
+              <li key={g.chaves.join("|")}>
+                <span className={g.tipo === "identico" ? "etiqueta etiqueta-erro" : "etiqueta"}>
+                  {g.tipo === "identico" ? "conteúdo idêntico" : "mesmo nome, conteúdo diferente"}
+                </span>
+                <ul>
+                  {g.documentos.map((d) => (
+                    <li key={d.chave} title={d.chave}>
+                      <button className="link" onClick={() => setFiltro(d.nome)}>
+                        {d.chave}
+                      </button>{" "}
+                      <span className="ajuda">({d.origem})</span>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="cartao">
         {carregando ? (

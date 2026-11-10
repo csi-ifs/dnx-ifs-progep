@@ -101,6 +101,9 @@ def s3():
     cliente.get_paginator.return_value.paginate.side_effect = (
         lambda **kw: _PREPARO if kw.get("Prefix") else _ACERVO
     )
+    # Conteúdo do envio em preparo: diferente de tudo no acervo, salvo quando o
+    # teste diz o contrário.
+    cliente.head_object.return_value = {"ETag": '"md5doenvio"'}
     return cliente
 
 
@@ -250,6 +253,137 @@ def test_preparo_so_e_apagado_depois_da_copia(s3, kb):
     )
     assert resposta["statusCode"] == 500
     s3.delete_object.assert_not_called()
+
+
+# --- Cópias no envio ------------------------------------------------------------
+
+def _acervo_com(*objetos):
+    """Troca o acervo do fake por estes (chave, etag)."""
+    return [{"Contents": [
+        {"Key": k, "ETag": f'"{e}"', "Size": 1,
+         "LastModified": datetime(2026, 9, 1, tzinfo=timezone.utc)}
+        for k, e in objetos
+    ]}]
+
+
+def _usar_acervo(s3, paginas):
+    s3.get_paginator.return_value.paginate.side_effect = (
+        lambda **kw: _PREPARO if kw.get("Prefix") else paginas
+    )
+
+
+def _indexar(s3, kb, **extra):
+    return handler(
+        _evento("POST", "/acervo/indexar",
+                {"chave": f"{PREPARO_PREFIX}{SUB}/CS 348.pdf", **extra}),
+        s3_client=s3, kb_client=kb,
+    )
+
+
+def test_copia_identica_nao_entra(s3, kb):
+    """Mesmo conteúdo com outro nome: recusado, mesmo pedindo para manter."""
+    _usar_acervo(s3, _acervo_com(("cliente/DAP/Resolucao_348.pdf", "abc")))
+    s3.head_object.return_value = {"ETag": '"abc"'}
+
+    for extra in ({}, {"acao": "manter_ambos"}, {"acao": "substituir"}):
+        resposta = _indexar(s3, kb, **extra)
+        assert resposta["statusCode"] == 409
+        corpo = _corpo(resposta)
+        assert corpo["conflito"] == "identico"
+        assert corpo["pode_prosseguir"] is False
+        assert corpo["identicos"] == ["cliente/DAP/Resolucao_348.pdf"]
+    s3.copy_object.assert_not_called()
+    s3.delete_object.assert_not_called()
+
+
+def test_mesmo_nome_pergunta_antes(s3, kb):
+    _usar_acervo(s3, _acervo_com(("cliente/DAP/CS_348.docx", "velho")))
+
+    resposta = _indexar(s3, kb)
+
+    assert resposta["statusCode"] == 409
+    corpo = _corpo(resposta)
+    assert corpo["conflito"] == "mesmo_nome"
+    assert corpo["pode_prosseguir"] is True
+    assert corpo["mesmo_nome"] == ["cliente/DAP/CS_348.docx"]
+    s3.copy_object.assert_not_called()
+
+
+def test_manter_ambos_indexa_sem_remover(s3, kb):
+    _usar_acervo(s3, _acervo_com(("cliente/DAP/CS_348.docx", "velho")))
+
+    resposta = _indexar(s3, kb, acao="manter_ambos")
+
+    assert resposta["statusCode"] == 200
+    assert _corpo(resposta)["substituidos"] == []
+    kb.delete_knowledge_base_documents.assert_not_called()
+
+
+def test_substituir_poe_a_antiga_na_lixeira_depois_da_nova(s3, kb):
+    """A nova entra antes de a antiga sair: falha no meio deixa as duas, não nenhuma."""
+    _usar_acervo(s3, _acervo_com(("cliente/DAP/CS_348.docx", "velho")))
+    ordem: list[str] = []
+    s3.copy_object.side_effect = lambda **kw: ordem.append(f"copia:{kw['Key']}")
+    s3.delete_object.side_effect = lambda **kw: ordem.append(f"apaga:{kw['Key']}")
+    kb.delete_knowledge_base_documents.side_effect = lambda **kw: ordem.append("apaga_kb")
+
+    resposta = _indexar(s3, kb, acao="substituir")
+
+    assert resposta["statusCode"] == 200
+    assert _corpo(resposta)["substituidos"] == ["cliente/DAP/CS_348.docx"]
+    assert ordem == [
+        "copia:cliente/painel/CS 348.pdf",
+        f"apaga:{PREPARO_PREFIX}{SUB}/CS 348.pdf",
+        f"copia:{REMOVIDOS_PREFIX}cliente/DAP/CS_348.docx",
+        "apaga:cliente/DAP/CS_348.docx",
+        "apaga_kb",
+    ]
+
+
+def test_substituir_o_mesmo_destino_guarda_a_anterior(s3, kb):
+    """Reenviar com o mesmo nome sobrescreve: a versão anterior vai antes para a lixeira."""
+    _usar_acervo(s3, _acervo_com(("cliente/painel/CS 348.pdf", "velho")))
+    ordem: list[str] = []
+    s3.copy_object.side_effect = lambda **kw: ordem.append(f"copia:{kw['Key']}")
+
+    resposta = _indexar(s3, kb, acao="substituir")
+
+    assert resposta["statusCode"] == 200
+    assert ordem == [
+        f"copia:{REMOVIDOS_PREFIX}cliente/painel/CS 348.pdf",
+        "copia:cliente/painel/CS 348.pdf",
+    ]
+    # Não sai da base: a cópia nova reindexa o mesmo documento.
+    kb.delete_knowledge_base_documents.assert_not_called()
+
+
+def test_substituir_so_aceita_chaves_do_conflito(s3, kb):
+    """A lista vinda da tela não pode virar um jeito de remover qualquer documento."""
+    _usar_acervo(s3, _acervo_com(("cliente/DAP/CS_348.docx", "velho"),
+                                 ("cliente/DAP/outro.pdf", "x")))
+
+    resposta = _indexar(s3, kb, acao="substituir", substituir=["cliente/DAP/outro.pdf"])
+
+    assert resposta["statusCode"] == 400
+    s3.copy_object.assert_not_called()
+    kb.delete_knowledge_base_documents.assert_not_called()
+
+
+def test_lista_duplicatas(s3, kb):
+    _usar_acervo(s3, _acervo_com(
+        ("cliente/DAP/a.pdf", "igual"), ("site/b.pdf", "igual"),
+        ("cliente/DNAGS/FAQ_NAPA.docx", "1"), ("cliente/painel/FAQ NAPA.pdf", "2"),
+        ("cliente/DSDPES/Vacancia.pdf", "3"), ("cliente/ocr/vacancia.md", "4"),
+        ("site/x/2024.html", "5"), ("site/y/2024.html", "6"),
+    ))
+
+    corpo = _corpo(handler(_evento("GET", "/acervo/duplicatas"), s3_client=s3, kb_client=kb))
+
+    assert [(g["tipo"], g["chaves"]) for g in corpo["grupos"]] == [
+        ("identico", ["cliente/DAP/a.pdf", "site/b.pdf"]),
+        ("mesmo_nome", ["cliente/DNAGS/FAQ_NAPA.docx", "cliente/painel/FAQ NAPA.pdf"]),
+    ]
+    assert corpo["grupos"][1]["documentos"][1]["origem"] == "painel"
 
 
 # --- Documentos na base --------------------------------------------------------

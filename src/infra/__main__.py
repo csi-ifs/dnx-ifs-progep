@@ -56,6 +56,9 @@ def main() -> None:
     # conta e a segunda cópia é cobrada. Religue se a conta sair da organização:
     #   pulumi config set progep-ifs:trilhaPropria true
     trilha_propria = pulumi.Config("progep-ifs").get_bool("trilhaPropria") or False
+    # Base de conhecimento em uso: "hierarquica" (padrão desde 10/11/2026) ou
+    # "fixa" (a original, de reserva). Trocar exige também o deploy do runtime.
+    base_ativa = pulumi.Config("progep-ifs").get("baseAtiva") or "hierarquica"
     provider = configure_provider(region=region)
     solution = define_resources(
         provider=provider,
@@ -65,16 +68,28 @@ def main() -> None:
         custos_equipe_tecnica=custos_equipe,
         custos_meta_isento=custos_meta_isento,
         trilha_propria=trilha_propria,
+        base_ativa=base_ativa,
     )
 
     pulumi.export("environment", stack)
     pulumi.export("region", region)
     pulumi.export("resource_count", len(solution.resources))
     pulumi.export("tagging_exceptions", solution.tagging_exceptions.as_dicts())
-    pulumi.export("knowledge_base_id", solution.resources["knowledge_base"].id)
-    pulumi.export("documents_bucket", solution.resources["documents_bucket"].bucket)
+    # A base **ativa** — é a que scripts/deploy_agentcore.ps1 passa ao runtime.
+    pulumi.export("base_ativa", base_ativa)
+    pulumi.export("knowledge_base_id", solution.resources["kb_ativa"].id)
     pulumi.export(
-        "kb_data_source_id", solution.resources["kb_data_source"].data_source_id
+        "kb_data_source_id", solution.resources["kb_ativa_data_source"].data_source_id
+    )
+    pulumi.export("documents_bucket", solution.resources["documents_bucket"].bucket)
+    # As duas bases, para sincronizar a de reserva antes de uma volta.
+    pulumi.export("knowledge_base_hier_id", solution.resources["knowledge_base_hier"].id)
+    pulumi.export(
+        "kb_hier_data_source_id", solution.resources["kb_hier_data_source"].data_source_id
+    )
+    pulumi.export("knowledge_base_fixa_id", solution.resources["knowledge_base"].id)
+    pulumi.export(
+        "kb_fixa_data_source_id", solution.resources["kb_data_source"].data_source_id
     )
     pulumi.export(
         "agentcore_ecr_url", solution.resources["agentcore_ecr"].repository_url

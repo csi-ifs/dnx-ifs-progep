@@ -372,6 +372,8 @@ class ArnContext:
     #: S3 Vectors bucket/index backing the Vector_Store.
     vector_bucket: str = "progep-ifs-vectors"
     vector_index: str = "progep-ifs-index"
+    #: Índice da base paralela com divisão hierárquica (em avaliação, 11/2026).
+    vector_index_hier: str = "progep-ifs-index-hier"
     secret_name: str = "progep-ifs/*"
     #: ARN do AgentCore Runtime que os handlers invocam (arquitetura única).
     #: Default escopado por nome (passa Property 21); o ARN concreto é injetado
@@ -424,6 +426,10 @@ def _vector_bucket_arn(ctx: ArnContext) -> str:
 
 def _vector_index_arn(ctx: ArnContext) -> str:
     return f"{_vector_bucket_arn(ctx)}/index/{ctx.vector_index}"
+
+
+def _vector_index_hier_arn(ctx: ArnContext) -> str:
+    return f"{_vector_bucket_arn(ctx)}/index/{ctx.vector_index_hier}"
 
 
 def _secret_arn(ctx: ArnContext) -> str:
@@ -504,7 +510,7 @@ def build_component_policies(ctx: ArnContext | None = None) -> dict[str, IamPoli
                     "s3vectors:DeleteVectors",
                     "s3vectors:ListVectors",
                 ],
-                [_vector_bucket_arn(c), _vector_index_arn(c)],
+                [_vector_bucket_arn(c), _vector_index_arn(c), _vector_index_hier_arn(c)],
                 sid="VectorStoreAccess",
             ),
             build_statement(
@@ -977,6 +983,7 @@ def define_resources(
     custos_equipe_tecnica: str = "",
     custos_meta_isento: str = "false",
     trilha_propria: bool = False,
+    base_ativa: str = "hierarquica",
 ) -> SolutionResources:
     """Declare all AWS resources of the solution via the shared provider.
 
@@ -1358,6 +1365,25 @@ def define_resources(
         "aws.bedrock.AgentDataSource não suporta tags",
     )
 
+    _definir_base_hierarquica(
+        out, c, prov=prov, native_prov=native_prov, opts=opts,
+        name_prefix=name_prefix, region=region, tags=apn_native_tags,
+        depends_on=[vector_bucket],
+    )
+
+    # Base que o assistente, o painel e o Ingestor usam. A hierárquica entrou em
+    # 10/11/2026 (§4.2 da documentação); a de divisão fixa fica de reserva para
+    # voltar com `pulumi config set progep-ifs:baseAtiva fixa` + `pulumi up` +
+    # deploy do runtime — sincronizando-a antes, porque o Ingestor só alimenta a
+    # base ativa.
+    if base_ativa not in BASES_DISPONIVEIS:
+        raise ValueError(f"baseAtiva deve ser uma de {BASES_DISPONIVEIS}, não {base_ativa!r}")
+    if base_ativa == "fixa":
+        r["kb_ativa"], r["kb_ativa_data_source"] = r["knowledge_base"], r["kb_data_source"]
+    else:
+        r["kb_ativa"] = r["knowledge_base_hier"]
+        r["kb_ativa_data_source"] = r["kb_hier_data_source"]
+
     # -- DynamoDB session table with TTL (Req 4.1, 4.3) --------------------------
     r["session_table"] = aws.dynamodb.Table(
         f"{name_prefix}-sessions",
@@ -1435,8 +1461,8 @@ def define_resources(
         memory_size=512,
         environment=aws.lambda_.FunctionEnvironmentArgs(
             variables={
-                "KNOWLEDGE_BASE_ID": r["knowledge_base"].id,
-                "DATA_SOURCE_ID": r["kb_data_source"].data_source_id,
+                "KNOWLEDGE_BASE_ID": r["kb_ativa"].id,
+                "DATA_SOURCE_ID": r["kb_ativa_data_source"].data_source_id,
                 "KB_BUCKET": r["documents_bucket"].bucket,
             }
         ),
@@ -1459,8 +1485,8 @@ def define_resources(
             variables={
                 "KB_BUCKET": r["documents_bucket"].bucket,
                 "STAGING_BUCKET": r["staging_bucket"].bucket,
-                "KNOWLEDGE_BASE_ID": r["knowledge_base"].id,
-                "DATA_SOURCE_ID": r["kb_data_source"].data_source_id,
+                "KNOWLEDGE_BASE_ID": r["kb_ativa"].id,
+                "DATA_SOURCE_ID": r["kb_ativa_data_source"].data_source_id,
                 "CORS_ALLOW_ORIGIN": cors_allow_origin,
                 "CUSTOS_TABLE": c.custos_table,
                 "CUSTOS_META_ISENTO": custos_meta_isento,
@@ -2331,6 +2357,98 @@ def define_resources(
     )
 
     return out
+
+
+#: Divisão hierárquica da base paralela: o assistente recebe o pedaço-pai
+#: (até 1.500 *tokens*), e a busca compara com os pedaços-filho (300). Com a
+#: divisão fixa de ~300 *tokens*, uma pergunta de FAQ podia ficar num pedaço e
+#: a resposta no seguinte (FAQ de estágio probatório, 09/11/2026): a busca achava
+#: o pedaço da pergunta, sem a resposta. Valores padrão recomendados pela AWS.
+CHUNKING_HIERARQUICO = {"pai": 1500, "filho": 300, "sobreposicao": 60}
+
+#: Bases que podem ser a ativa (config `progep-ifs:baseAtiva`).
+BASES_DISPONIVEIS = ("hierarquica", "fixa")
+
+
+def _definir_base_hierarquica(
+    out: SolutionResources,
+    c: ArnContext,
+    *,
+    prov: Any,
+    native_prov: Any,
+    opts: Any,
+    name_prefix: str,
+    region: str,
+    tags: list,
+    depends_on: list,
+) -> None:
+    """Base de conhecimento paralela, com divisão hierárquica, para avaliação.
+
+    Mesmos documentos (mesmo bucket), mesmo modelo de embedding, índice próprio.
+    Nenhum componente a usa até a troca de ``KNOWLEDGE_BASE_ID``; enquanto isso a
+    sincronização é manual (o Ingestor só dispara a base atual).
+    """
+    r = out.resources
+    indice = native_s3vectors.Index(
+        f"{name_prefix}-vector-index-hier",
+        vector_bucket_name=c.vector_bucket,
+        index_name=c.vector_index_hier,
+        data_type="float32",
+        dimension=1024,
+        distance_metric="cosine",
+        metadata_configuration=native_s3vectors.IndexMetadataConfigurationArgs(
+            non_filterable_metadata_keys=["AMAZON_BEDROCK_TEXT", "AMAZON_BEDROCK_METADATA"],
+        ),
+        tags=tags,
+        opts=pulumi.ResourceOptions(provider=native_prov, depends_on=depends_on),
+    )
+    r["knowledge_base_hier"] = aws.bedrock.AgentKnowledgeBase(
+        f"{name_prefix}-kb-hier",
+        name=f"{name_prefix}-kb-hier",
+        role_arn=r["kb_role"].arn,
+        knowledge_base_configuration=aws.bedrock.AgentKnowledgeBaseKnowledgeBaseConfigurationArgs(
+            type="VECTOR",
+            vector_knowledge_base_configuration=aws.bedrock.AgentKnowledgeBaseKnowledgeBaseConfigurationVectorKnowledgeBaseConfigurationArgs(
+                embedding_model_arn=_embedding_model_arn(c, region=region),
+            ),
+        ),
+        storage_configuration=aws.bedrock.AgentKnowledgeBaseStorageConfigurationArgs(
+            type="S3_VECTORS",
+            s3_vectors_configuration=aws.bedrock.AgentKnowledgeBaseStorageConfigurationS3VectorsConfigurationArgs(
+                index_arn=indice.index_arn,
+            ),
+        ),
+        opts=pulumi.ResourceOptions(provider=prov, depends_on=[indice]),
+    )
+    r["kb_hier_data_source"] = aws.bedrock.AgentDataSource(
+        f"{name_prefix}-kb-hier-datasource",
+        knowledge_base_id=r["knowledge_base_hier"].id,
+        name=f"{name_prefix}-documents-hier",
+        data_source_configuration=aws.bedrock.AgentDataSourceDataSourceConfigurationArgs(
+            type="S3",
+            s3_configuration=aws.bedrock.AgentDataSourceDataSourceConfigurationS3ConfigurationArgs(
+                bucket_arn=r["documents_bucket"].arn,
+            ),
+        ),
+        vector_ingestion_configuration=aws.bedrock.AgentDataSourceVectorIngestionConfigurationArgs(
+            chunking_configuration=aws.bedrock.AgentDataSourceVectorIngestionConfigurationChunkingConfigurationArgs(
+                chunking_strategy="HIERARCHICAL",
+                hierarchical_chunking_configuration=aws.bedrock.AgentDataSourceVectorIngestionConfigurationChunkingConfigurationHierarchicalChunkingConfigurationArgs(
+                    level_configurations=[
+                        aws.bedrock.AgentDataSourceVectorIngestionConfigurationChunkingConfigurationHierarchicalChunkingConfigurationLevelConfigurationArgs(
+                            max_tokens=CHUNKING_HIERARQUICO["pai"]),
+                        aws.bedrock.AgentDataSourceVectorIngestionConfigurationChunkingConfigurationHierarchicalChunkingConfigurationLevelConfigurationArgs(
+                            max_tokens=CHUNKING_HIERARQUICO["filho"]),
+                    ],
+                    overlap_tokens=CHUNKING_HIERARQUICO["sobreposicao"],
+                ),
+            ),
+        ),
+        opts=opts,
+    )
+    out.tagging_exceptions.register(
+        f"{name_prefix}-kb-hier-datasource", "aws.bedrock.AgentDataSource não suporta tags"
+    )
 
 
 #: Log groups assinados pelo controle de custos e o filtro de cada um. O de

@@ -334,10 +334,33 @@ def main(argv: list[str] | None = None) -> int:
 
     import boto3  # importado tarde para permitir --dry-run sem AWS
 
+    import hashlib
+
     s3 = boto3.client("s3", region_name=args.region)
+    # Conteúdo que já está no acervo, por MD5 (o ETag de envio de parte única).
+    # O site publica o mesmo PDF em mais de um caminho, e parte dele já veio
+    # pelo repositório da PROGEP: enviar de novo duplicaria trechos na busca —
+    # e reenviar o que não mudou só gastaria uma reindexação.
+    ja_no_acervo: dict[str, str] = {}
+    for pagina in s3.get_paginator("list_objects_v2").paginate(Bucket=args.bucket):
+        for obj in pagina.get("Contents", []) or []:
+            etag = obj.get("ETag", "").strip('"')
+            if etag and "-" not in etag:
+                ja_no_acervo.setdefault(etag, obj["Key"])
+    enviados = pulados = 0
     for key, body, content_type in uploads:
+        md5 = hashlib.md5(body).hexdigest()
+        existente = ja_no_acervo.get(md5)
+        if existente:
+            motivo = "sem mudança" if existente == key else f"mesmo conteúdo de {existente}"
+            print(f"  pulado ({motivo}): {key}")
+            pulados += 1
+            continue
         s3.put_object(Bucket=args.bucket, Key=key, Body=body, ContentType=content_type)
+        ja_no_acervo[md5] = key
+        enviados += 1
         print(f"  enviado: {key}")
+    print(f"\n{enviados} enviado(s), {pulados} pulado(s) por já estarem no acervo.")
     print("\nUpload concluido; a notificacao S3 aciona o Ingestor automaticamente.")
     return 0
 

@@ -34,7 +34,8 @@ from src.domain.models import AgentRequest  # noqa: E402
 
 ACCOUNT = "342016537070"
 REGION = "us-east-1"
-KB_ID = "1AACEWPJNC"
+#: Base hierárquica (ativa desde 10/11/2026); a de divisão fixa é 1AACEWPJNC.
+KB_ID = "INLYXJCFOW"
 THRESHOLD = 0.4
 
 MODELOS = {

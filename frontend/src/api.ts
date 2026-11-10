@@ -42,6 +42,39 @@ type Envio = {
   nome: string;
 };
 
+/** Erro da API com o corpo da resposta, para a tela tratar casos como o 409. */
+export class ErroDaApi extends Error {
+  constructor(
+    mensagem: string,
+    readonly status: number,
+    readonly dados: Record<string, unknown>,
+  ) {
+    super(mensagem);
+  }
+}
+
+/** O envio esbarra em algo do acervo (HTTP 409 de `/acervo/indexar`). */
+export type ConflitoDeEnvio = {
+  erro: string;
+  conflito: "identico" | "mesmo_nome";
+  identicos: string[];
+  mesmo_nome: string[];
+  /** `false` para cópia idêntica: não há o que escolher, só descartar. */
+  pode_prosseguir: boolean;
+};
+
+export function conflitoDoErro(e: unknown): ConflitoDeEnvio | null {
+  return e instanceof ErroDaApi && e.status === 409 && e.dados.conflito
+    ? (e.dados as unknown as ConflitoDeEnvio)
+    : null;
+}
+
+export type GrupoDeDuplicatas = {
+  tipo: "identico" | "mesmo_nome";
+  chaves: string[];
+  documentos: { chave: string; nome: string; origem: string }[];
+};
+
 async function chamar<T>(
   api: string,
   token: string,
@@ -59,7 +92,11 @@ async function chamar<T>(
   if (!resposta.ok) {
     // A mensagem do backend é escrita para quem está na tela ("Apenas
     // administradores podem..."); repassá-la é melhor que um código HTTP.
-    throw new Error(dados?.erro || `Falha na requisição (HTTP ${resposta.status}).`);
+    throw new ErroDaApi(
+      dados?.erro || `Falha na requisição (HTTP ${resposta.status}).`,
+      resposta.status,
+      dados ?? {},
+    );
   }
   return dados as T;
 }
@@ -138,11 +175,20 @@ export function confirmarIndexacao(
   token: string,
   chave: string,
   titulo: string,
-): Promise<{ indexado: string; situacao: string }> {
+  acao?: "substituir" | "manter_ambos",
+): Promise<{ indexado: string; situacao: string; substituidos: string[] }> {
   return chamar(api, token, "POST", "/acervo/indexar", {
     chave,
     titulo: titulo.trim() || undefined,
+    acao,
   });
+}
+
+export function listarDuplicatas(
+  api: string,
+  token: string,
+): Promise<{ grupos: GrupoDeDuplicatas[]; total: number }> {
+  return chamar(api, token, "GET", "/acervo/duplicatas");
 }
 
 export function removerDocumento(

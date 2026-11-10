@@ -135,7 +135,7 @@ docs/         # documentação; as transcrições (ocr/, fluxos/, faq/) ficam
                         │                     classificação do setor
                         └──────────┬──────────┘
                                    v
-                    Knowledge Base 1AACEWPJNC
+                    Knowledge Base INLYXJCFOW (hierárquica)
                                    │
                     ┌──────────────┴───────────────┐
                     v                              v
@@ -184,9 +184,9 @@ No WhatsApp (`lambda_entry.processar_mensagens_whatsapp`), nesta ordem:
 
 | Serviço | Recurso | Papel |
 |---------|---------|-------|
-| Amazon Bedrock | KB `1AACEWPJNC` (data source `ACPN3VUCDG`), Claude Sonnet 4.5 (perfil `global.`), Titan Embed v2 | Recuperação, geração e classificação de setor |
+| Amazon Bedrock | KB ativa `INLYXJCFOW` (data source `I50FTDPEQ6`, divisão hierárquica); reserva `1AACEWPJNC` (`ACPN3VUCDG`, divisão fixa) — §4.2; Claude Sonnet 4.5 (perfil `global.`), Titan Embed v2 | Recuperação, geração e classificação de setor |
 | Bedrock AgentCore | Runtime `progep_ifs_agent-07SkZL6Kh5` | Hospedagem do agente (executa sob demanda) |
-| Amazon S3 Vectors | `progep-ifs-vectors` / índice `progep-ifs-index` | Vector store da KB |
+| Amazon S3 Vectors | `progep-ifs-vectors` / índices `progep-ifs-index-hier` (ativa) e `progep-ifs-index` (reserva) | Vector store da KB |
 | Amazon S3 | `progep-ifs-documents` | Documentos da base (fonte da KB) |
 | Amazon S3 | `progep-ifs-staging` | Preparo de uploads do painel (`preparo/`) e lixeira (`removidos/`, 30 dias) |
 | Amazon S3 + CloudFront | `progep-ifs-painel` / distribuição `progep-ifs-painel-cf` | Site estático do painel do acervo |
@@ -268,15 +268,53 @@ O repositório do cliente vem organizado por departamento — DAP (73), DSDPES
 (26), DNAGS (11), SIASS (11), PROGEP (2) — e a sigla é preservada no caminho do
 S3, então a origem aparece na fonte citada pelo assistente.
 
-### 4.2 Vector store
+### 4.2 Vector store e divisão em trechos
 
 **S3 Vectors** (não OpenSearch Serverless, como no design original) — a troca foi
-por custo: ~zero contra ~US$ 350/mês. Índice `progep-ifs-index`, Titan Embed v2,
-1024 dimensões.
+por custo: ~zero contra ~US$ 350/mês. Titan Embed v2, 1024 dimensões.
 
 > **Pegadinha:** o índice precisa de `AMAZON_BEDROCK_TEXT` **e**
 > `AMAZON_BEDROCK_METADATA` como não-filtráveis. Sem isso os documentos estouram
 > o limite de 2048 bytes de metadado filtrável e a indexação falha.
+
+**Duas bases, uma ativa.** Desde 10/11/2026 o assistente usa a base com
+**divisão hierárquica** (`INLYXJCFOW`, índice `progep-ifs-index-hier`): a busca
+compara trechos pequenos (filhos, ~300 tokens) e entrega ao modelo o trecho
+grande que os contém (pai, ~1.500 tokens; sobreposição de 60). A base original,
+com **divisão fixa** (`1AACEWPJNC`, índice `progep-ifs-index`), fica de reserva
+com o mesmo acervo.
+
+*Por que a troca.* Feedback do cliente: "quantas avaliações de estágio
+probatório serão realizadas?" não era respondida, embora o FAQ estivesse
+indexado. Na divisão fixa, a pergunta e a resposta do FAQ caíam em trechos
+diferentes — a busca achava a pergunta, sem a resposta, e o modelo dizia que
+não havia a informação. Com o pai de 1.500 tokens, pergunta e resposta chegam
+juntas ao modelo. Medido nas baterias: sem perda nas demais perguntas.
+
+*Efeito no custo.* O contexto enviado ao modelo passou de ~1.100 para ~4.700
+tokens por pergunta: o custo por pergunta foi de US$ 0,03–0,05 para
+**US$ 0,04–0,06**. A latência não mudou de forma perceptível.
+
+*Qual base está ativa* sai da configuração `progep-ifs:baseAtiva`
+(`hierarquica`, padrão, ou `fixa`). Ela define a base das Lambdas `acervo` e
+`ingestor`; o runtime recebe o id pelo output `knowledge_base_id` no
+`deploy_agentcore.ps1`. Para voltar à base de reserva:
+
+```bash
+pulumi config set progep-ifs:baseAtiva fixa
+pulumi up
+.\scripts\deploy_agentcore.ps1
+```
+
+Antes da volta, sincronize a base de reserva (o painel só altera a ativa):
+`aws bedrock-agent start-ingestion-job` com os outputs `knowledge_base_fixa_id`
+e `kb_fixa_data_source_id`. Documento **removido** pelo painel enquanto a outra
+base estava ativa precisa sair também da reserva — a sincronização cuida disso,
+porque o arquivo não está mais no bucket.
+
+Quando a base hierárquica tiver se mostrado estável, a reserva pode ser
+apagada (sai de `_definir_base_hierarquica`/`BASES_DISPONIVEIS` em
+`src/infra/resources.py` e o índice `progep-ifs-index` é removido).
 
 ### 4.3 Formatos aceitos
 
@@ -307,8 +345,11 @@ confira o formato antes de procurar bug.
   mais parecidos. Em 29/09/2026 o Manual de Perícia de 2017 estava 4 vezes na
   base (dois pares de arquivos idênticos), e as 4 cópias do mesmo trecho
   ocupavam as 5 vagas — a Cartilha SIASS de 2024, atual, ficava de fora e o
-  assistente respondia com a regra antiga. Três cópias foram removidas. Antes
-  de subir um lote, compare os hashes (`ETag`) com o que já está no bucket.
+  assistente respondia com a regra antiga. Três cópias foram removidas em
+  setembro e mais sete em 10/11/2026. Desde então o painel **recusa** cópia
+  idêntica e pergunta antes de indexar documento com o mesmo nome (§8.2), e o
+  `ingest_site.py` pula arquivo cujo conteúdo já está no bucket. Para lotes
+  subidos por outro script, compare os hashes (`ETag`) antes.
 - **Diagramação de PDF atrapalha a busca.** PDFs de folheto quebram palavras
   com hífen ("servi - dor"). A transcrição limpa ajuda pouco no ranking, mas
   permite marcar cada seção com fonte e ano (indexada como
@@ -1006,7 +1047,16 @@ usuário `teste-acervo`.
    com título editável.
 3. **Indexação:** `POST /acervo/indexar` copia para
    `progep-ifs-documents/cliente/painel/…`; o `ObjectCreated` aciona o Ingestor
-   e a KB indexa em alguns minutos.
+   e a KB indexa em alguns minutos. **Antes da cópia, a conferência de cópias**
+   (`acervo.conflitos_do_envio` / `decidir_conflito`), comparando o `ETag`
+   (MD5) e o nome-base (sem pasta, extensão, acento e sufixo "(1)") com todo o
+   acervo:
+   - **conteúdo idêntico** a algo do acervo → HTTP 409, não entra (não há
+     opção de forçar: a cópia só ocuparia vagas na busca);
+   - **mesmo nome**, conteúdo diferente → HTTP 409 com a lista; a tela
+     pergunta e reenvia com `acao: "substituir"` (as antigas vão para a
+     lixeira **depois** que a nova entrou) ou `acao: "manter_ambos"`. Só
+     podem ser substituídas chaves que estão na lista do conflito.
 4. **Remoção** (`DELETE /acervo/documentos`) vale para **qualquer** documento da
    base, não só os do painel: copia para `progep-ifs-staging/removidos/<chave
    original>` (30 dias), apaga do bucket e chama `DeleteKnowledgeBaseDocuments`.
@@ -1023,6 +1073,18 @@ usuário `teste-acervo`.
 não indexados — em geral PDF escaneado; ver `ocr_documentos.py`) e **órfãos**.
 A listagem da KB é lenta (~25 itens por página, 5–7 s para 400 documentos); a
 lista de documentos do painel vem do S3.
+
+`GET /acervo/duplicatas` lista as cópias que **já estão** no acervo, no topo
+da aba "Documentos na base": grupos de conteúdo idêntico (qualquer origem) e
+grupos de mesmo nome entre documentos curados (repositório e painel). Ficam
+fora da comparação por nome as páginas do site (repetem nome por natureza, ex.:
+`concursos/2024.html` e `remocao-interna/2024.html`) e as transcrições em
+`cliente/ocr/`, que têm o nome do PDF de propósito.
+
+> Os 22 fluxogramas em PDF enviados pela PROGEP em 30/09/2026
+> (`cliente/painel/PDF - …`) são imagens e aparecem como "não responde" na
+> conferência. **Não é falha**: todos já estão transcritos em
+> `site/mapeamento-processos/` (a partir dos PNGs do site, mesmo conteúdo).
 
 ### 8.4 Publicar o painel
 
@@ -1230,7 +1292,7 @@ O upload no S3 aciona o Ingestor, que faz debounce e coalesce o lote num único
 job. Se precisar disparar manualmente:
 
 ```bash
-aws bedrock-agent start-ingestion-job --knowledge-base-id 1AACEWPJNC --data-source-id ACPN3VUCDG --region us-east-1
+aws bedrock-agent start-ingestion-job --knowledge-base-id INLYXJCFOW --data-source-id I50FTDPEQ6 --region us-east-1
 ```
 
 ### 10.5 Runtime do agente
@@ -1397,6 +1459,17 @@ são para quem continuar a evoluí-lo.
 ---
 
 ## 13. Changelog
+
+### 2026-11-10
+- **Base com divisão hierárquica** (§4.2), após o feedback do FAQ de estágio
+  probatório não reconhecido: a pergunta e a resposta do FAQ caíam em trechos
+  diferentes. Runtime v19; a base de divisão fixa fica de reserva
+  (`progep-ifs:baseAtiva`). Custo por pergunta: US$ 0,04–0,06.
+- **Sete cópias idênticas removidas** do acervo (para a lixeira).
+- **Proteção contra cópias no painel** (§8.2, §8.3): cópia idêntica é
+  recusada, mesmo nome pergunta se substitui ou mantém os dois, e a aba
+  "Documentos na base" lista as cópias que já existem. `ingest_site.py` pula
+  conteúdo que já está no bucket.
 
 ### 2026-10-08
 - **Documentação revisada** (técnica e visão geral) e novo documento de custos

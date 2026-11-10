@@ -8,9 +8,11 @@
  * resolve o arquivo errado sem precisar de remoção depois.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   type ArquivoEmPreparo,
+  type ConflitoDeEnvio,
+  conflitoDoErro,
   confirmarIndexacao,
   descartarPreparo,
   enviarParaPreparo,
@@ -33,6 +35,10 @@ export function Acervo({
   // o administrador confere o que subiu. Perguntar antes obrigaria a nomear às
   // cegas; depois seria tarde, o objeto já teria sido copiado com o metadado.
   const [titulos, setTitulos] = useState<Record<string, string>>({});
+  // Conflito com o acervo por arquivo em preparo (cópia idêntica ou mesmo
+  // nome). Fica na linha do arquivo, e não no aviso geral, porque pede uma
+  // decisão sobre **aquele** arquivo.
+  const [conflitos, setConflitos] = useState<Record<string, ConflitoDeEnvio>>({});
   const entrada = useRef<HTMLInputElement>(null);
 
   const recarregar = useCallback(async () => {
@@ -59,6 +65,41 @@ export function Acervo({
       await recarregar();
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Não foi possível concluir.");
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  function esquecerConflito(chave: string) {
+    setConflitos(({ [chave]: _, ...resto }) => resto);
+  }
+
+  async function indexar(item: ArquivoEmPreparo, acao?: "substituir" | "manter_ambos") {
+    setErro(null);
+    setAviso(null);
+    setOcupado(true);
+    try {
+      const r = await confirmarIndexacao(
+        api,
+        await obterToken(),
+        item.chave,
+        titulos[item.chave] ?? "",
+        acao,
+      );
+      esquecerConflito(item.chave);
+      setAviso(
+        r.substituidos?.length
+          ? `"${item.nome}" entrou na fila de indexação. A versão anterior foi para a lixeira (recuperável por 30 dias).`
+          : `"${item.nome}" entrou na fila de indexação.`,
+      );
+      await recarregar();
+    } catch (e) {
+      const conflito = conflitoDoErro(e);
+      if (conflito) {
+        setConflitos((c) => ({ ...c, [item.chave]: conflito }));
+      } else {
+        setErro(e instanceof Error ? e.message : "Não foi possível concluir.");
+      }
     } finally {
       setOcupado(false);
     }
@@ -118,7 +159,8 @@ export function Acervo({
             </thead>
             <tbody>
               {itens.map((item) => (
-                <tr key={item.chave}>
+                <Fragment key={item.chave}>
+                <tr>
                   <td className="nome">{item.nome}</td>
                   <td>{formatarBytes(item.tamanho)}</td>
                   <td>
@@ -135,19 +177,8 @@ export function Acervo({
                   <td className="acoes">
                     <button
                       className="primario"
-                      disabled={ocupado}
-                      onClick={() =>
-                        void comOcupado(
-                          async () =>
-                            void (await confirmarIndexacao(
-                              api,
-                              await obterToken(),
-                              item.chave,
-                              titulos[item.chave] ?? "",
-                            )),
-                          `"${item.nome}" entrou na fila de indexação.`,
-                        )
-                      }
+                      disabled={ocupado || item.chave in conflitos}
+                      onClick={() => void indexar(item)}
                     >
                       Indexar
                     </button>
@@ -155,21 +186,30 @@ export function Acervo({
                       className="discreto"
                       disabled={ocupado}
                       onClick={() =>
-                        void comOcupado(
-                          async () =>
-                            void (await descartarPreparo(
-                              api,
-                              await obterToken(),
-                              item.chave,
-                            )),
-                          `"${item.nome}" descartado.`,
-                        )
+                        void comOcupado(async () => {
+                          await descartarPreparo(api, await obterToken(), item.chave);
+                          esquecerConflito(item.chave);
+                        }, `"${item.nome}" descartado.`)
                       }
                     >
                       Descartar
                     </button>
                   </td>
                 </tr>
+                {conflitos[item.chave] && (
+                  <tr className="linha-conflito">
+                    <td colSpan={4}>
+                      <AvisoDeConflito
+                        conflito={conflitos[item.chave]}
+                        ocupado={ocupado}
+                        aoSubstituir={() => void indexar(item, "substituir")}
+                        aoManterAmbos={() => void indexar(item, "manter_ambos")}
+                        aoCancelar={() => esquecerConflito(item.chave)}
+                      />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -182,5 +222,61 @@ export function Acervo({
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * Cópia idêntica não tem escolha: a mesma informação duas vezes ocupa o dobro
+ * das vagas na busca e empurra para fora o trecho de outro documento. Mesmo
+ * nome pode ser versão nova ou documento diferente — quem sabe é quem enviou.
+ */
+function AvisoDeConflito({
+  conflito,
+  ocupado,
+  aoSubstituir,
+  aoManterAmbos,
+  aoCancelar,
+}: {
+  conflito: ConflitoDeEnvio;
+  ocupado: boolean;
+  aoSubstituir: () => void;
+  aoManterAmbos: () => void;
+  aoCancelar: () => void;
+}) {
+  const lista = conflito.pode_prosseguir ? conflito.mesmo_nome : conflito.identicos;
+  return (
+    <div className="confirmacao">
+      <p className="alerta">
+        {conflito.pode_prosseguir
+          ? "Já existe no acervo documento com o mesmo nome:"
+          : "Este arquivo já está no acervo, com o mesmo conteúdo:"}
+      </p>
+      <ul className="lista-conflito">
+        {lista.map((chave) => (
+          <li key={chave} title={chave}>
+            {chave}
+          </li>
+        ))}
+      </ul>
+      {conflito.pode_prosseguir ? (
+        <>
+          <p>
+            Se for uma versão nova, substitua: a anterior sai da base e fica
+            recuperável por 30 dias. Se for outro documento, mantenha os dois.
+          </p>
+          <button className="primario" disabled={ocupado} onClick={aoSubstituir}>
+            Substituir
+          </button>
+          <button className="discreto" disabled={ocupado} onClick={aoManterAmbos}>
+            Manter os dois
+          </button>
+        </>
+      ) : (
+        <p>Não é preciso enviar de novo. Descarte este envio.</p>
+      )}
+      <button className="discreto" disabled={ocupado} onClick={aoCancelar}>
+        Fechar
+      </button>
+    </div>
   );
 }

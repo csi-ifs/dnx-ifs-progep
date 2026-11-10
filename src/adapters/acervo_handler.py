@@ -8,6 +8,7 @@
 | ``POST /acervo/indexar``    | admin | copia preparo → documentos e enfileira      |
 | ``GET /acervo/documentos``  | admin | o acervo (lido do S3), com procedência       |
 | ``GET /acervo/conferencia`` | admin | compara o bucket com a base                  |
+| ``GET /acervo/duplicatas``  | admin | cópias já no acervo (idênticas, mesmo nome)  |
 | ``DELETE /acervo/documentos``| admin | remoção reversível (lixeira + KB)          |
 | ``GET /acervo/custos``      | admin | custos do assistente (aba "Custos")         |
 
@@ -36,12 +37,17 @@ from typing import Any, Mapping
 from urllib.parse import quote, unquote
 
 from src.domain.acervo import (
+    ConflitoNoAcervo,
     NaoAutorizado,
+    Objeto,
     PedidoInvalido,
     chave_de_preparo,
     chave_publicada,
     chave_removida,
+    conflitos_do_envio,
+    decidir_conflito,
     exige_admin,
+    grupos_de_duplicatas,
     procedencia,
     validar_chave_do_acervo,
     validar_envio,
@@ -195,18 +201,54 @@ def _descartar_preparo(corpo: dict, sub: str, s3: Any, bucket_preparo: str) -> d
     return {"descartado": chave}
 
 
+def _objetos_do_acervo(s3: Any, bucket_documentos: str) -> list[Objeto]:
+    return [
+        Objeto(obj["Key"], obj.get("ETag"))
+        for pagina in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket_documentos)
+        for obj in pagina.get("Contents", []) or []
+        if not obj["Key"].endswith("/")
+    ]
+
+
 def _indexar(
-    corpo: dict, sub: str, s3: Any, bucket_preparo: str, bucket_documentos: str
+    corpo: dict,
+    sub: str,
+    s3: Any,
+    kb: Any,
+    *,
+    bucket_preparo: str,
+    bucket_documentos: str,
+    kb_id: str,
+    data_source_id: str,
 ) -> dict:
     """Move do preparo para o acervo. É aqui que o documento entra na base.
 
     A cópia para o bucket de documentos dispara a notificação que já existe →
     Ingestor → ingestion job. Não é preciso chamar a KB daqui.
+
+    **Antes, a conferência de cópias** (:func:`decidir_conflito`): conteúdo
+    idêntico a algo do acervo é recusado; mesmo nome volta como conflito (409)
+    para a tela perguntar se é versão nova (``acao="substituir"``, a antiga vai
+    para a lixeira) ou outro documento (``acao="manter_ambos"``).
     """
     chave = _garantir_do_usuario(corpo.get("chave", ""), sub)
     titulo = validar_titulo(corpo.get("titulo"))
     nome = chave.rsplit("/", 1)[-1]
     destino = chave_publicada(nome)
+
+    etag = s3.head_object(Bucket=bucket_preparo, Key=chave).get("ETag")
+    conflitos = conflitos_do_envio(
+        nome, etag, _objetos_do_acervo(s3, bucket_documentos), destino
+    )
+    substituir = decidir_conflito(conflitos, corpo.get("acao"), corpo.get("substituir"))
+    if destino in substituir:
+        # A cópia nova vai sobrescrever o destino: guarda a anterior na lixeira
+        # antes, senão "substituir" seria apagar sem volta.
+        s3.copy_object(
+            Bucket=bucket_preparo,
+            Key=chave_removida(destino),
+            CopySource={"Bucket": bucket_documentos, "Key": destino},
+        )
 
     argumentos: dict[str, Any] = {
         "Bucket": bucket_documentos,
@@ -222,8 +264,19 @@ def _indexar(
     # Só apaga o preparo depois da cópia: se a cópia falhar, o envio continua
     # na lista para nova tentativa em vez de sumir sem ter entrado na base.
     s3.delete_object(Bucket=bucket_preparo, Key=chave)
+    # As outras versões saem **depois** que a nova entrou: se a remoção falhar no
+    # meio, sobram as duas (o mesmo que "manter ambos"), nunca nenhuma.
+    substituidos = []
+    for antiga in substituir:
+        if antiga != destino:
+            _para_lixeira(
+                antiga, s3, kb,
+                bucket_documentos=bucket_documentos, bucket_preparo=bucket_preparo,
+                kb_id=kb_id, data_source_id=data_source_id,
+            )
+        substituidos.append(antiga)
     return {"indexado": destino, "nome": nome, "titulo": titulo,
-            "situacao": "na fila de indexação"}
+            "situacao": "na fila de indexação", "substituidos": substituidos}
 
 
 def _listar_documentos(s3: Any, bucket_documentos: str) -> dict:
@@ -342,6 +395,29 @@ def _remover_documento(
     em que o documento não responde e ainda não está recuperável.
     """
     chave = validar_chave_do_acervo(corpo.get("chave", ""))
+    _para_lixeira(
+        chave, s3, kb,
+        bucket_documentos=bucket_documentos, bucket_preparo=bucket_preparo,
+        kb_id=kb_id, data_source_id=data_source_id,
+    )
+    proc = procedencia(chave)
+    return {
+        "removido": chave,
+        "recuperavel_em": chave_removida(chave),
+        "aviso": proc.aviso,
+    }
+
+
+def _para_lixeira(
+    chave: str,
+    s3: Any,
+    kb: Any,
+    *,
+    bucket_documentos: str,
+    bucket_preparo: str,
+    kb_id: str,
+    data_source_id: str,
+) -> None:
     s3.copy_object(
         Bucket=bucket_preparo,
         Key=chave_removida(chave),
@@ -358,12 +434,18 @@ def _remover_documento(
             }
         ],
     )
-    proc = procedencia(chave)
-    return {
-        "removido": chave,
-        "recuperavel_em": chave_removida(chave),
-        "aviso": proc.aviso,
-    }
+
+
+def _duplicatas(s3: Any, bucket_documentos: str) -> dict:
+    """Cópias que já estão no acervo (:func:`grupos_de_duplicatas`)."""
+    grupos = grupos_de_duplicatas(_objetos_do_acervo(s3, bucket_documentos))
+    for grupo in grupos:
+        grupo["documentos"] = [
+            {"chave": c, "nome": unquote(c.rsplit("/", 1)[-1]),
+             "origem": procedencia(c).origem}
+            for c in grupo["chaves"]
+        ]
+    return {"grupos": grupos, "total": len(grupos)}
 
 
 #: Períodos da aba de custos → (início, fim) a partir de hoje (fuso do IFS).
@@ -456,10 +538,19 @@ def handler(
             return _resposta(200, _descartar_preparo(corpo, sub, s3, bucket_preparo))
         if rota == "POST /acervo/indexar":
             return _resposta(
-                200, _indexar(corpo, sub, s3, bucket_preparo, bucket_documentos)
+                200,
+                _indexar(
+                    corpo, sub, s3, kb,
+                    bucket_preparo=bucket_preparo,
+                    bucket_documentos=bucket_documentos,
+                    kb_id=kb_id,
+                    data_source_id=data_source_id,
+                ),
             )
         if rota == "GET /acervo/documentos":
             return _resposta(200, _listar_documentos(s3, bucket_documentos))
+        if rota == "GET /acervo/duplicatas":
+            return _resposta(200, _duplicatas(s3, bucket_documentos))
         if rota == "GET /acervo/conferencia":
             return _resposta(
                 200, _conferir(s3, kb, bucket_documentos, kb_id, data_source_id)
@@ -479,6 +570,8 @@ def handler(
 
     except NaoAutorizado as erro:
         return _resposta(403, {"erro": str(erro)})
+    except ConflitoNoAcervo as erro:
+        return _resposta(409, erro.como_dict())
     except PedidoInvalido as erro:
         return _resposta(400, {"erro": str(erro)})
     except KeyError as erro:

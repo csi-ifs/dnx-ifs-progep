@@ -17,7 +17,14 @@ from src.domain.acervo import (
     chave_de_preparo,
     chave_publicada,
     chave_removida,
+    ConflitoNoAcervo,
+    Conflitos,
+    Objeto,
+    conflitos_do_envio,
+    conteudo_hash,
+    decidir_conflito,
     exige_admin,
+    nome_base,
     nome_seguro,
     procedencia,
     validar_chave_do_acervo,
@@ -244,3 +251,69 @@ def test_origem_visivel_na_lista(chave, origem):
 def test_documento_do_repositorio_e_removivel_em_definitivo():
     """Carga única: apagar vale de verdade, e é o que o cliente pediu."""
     assert procedencia("cliente/DNAGS/CS_348.pdf").regenerave is False
+
+
+# --- Cópias ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "chave,esperado",
+    [
+        ("cliente/DNAGS/FAQ_NAPA.docx", "faq napa"),
+        ("cliente/painel/FAQ NAPA.pdf", "faq napa"),
+        ("cliente/painel/Projeto_Mente_em_foco_versão_final.docx (1).pdf",
+         "projeto mente em foco versao final"),
+        ("cliente/DAP/Resolução CS 348.PDF", "resolucao cs 348"),
+    ],
+)
+def test_nome_base(chave, esperado):
+    assert nome_base(chave) == esperado
+
+
+def test_etag_de_multipart_nao_e_hash_do_conteudo():
+    assert conteudo_hash('"ABC123"') == "abc123"
+    assert conteudo_hash('"abc123-4"') is None
+    assert conteudo_hash(None) is None
+
+
+def test_conflitos_separam_identico_de_mesmo_nome():
+    acervo = [
+        Objeto("cliente/DAP/outro_nome.pdf", '"aaa"'),
+        Objeto("cliente/DAP/CS_348.docx", '"bbb"'),
+        Objeto("cliente/DAP/sem_relacao.pdf", '"ccc"'),
+    ]
+    achados = conflitos_do_envio("CS 348.pdf", '"aaa"', acervo, "cliente/painel/CS 348.pdf")
+    assert achados.identicos == ["cliente/DAP/outro_nome.pdf"]
+    assert achados.mesmo_nome == ["cliente/DAP/CS_348.docx"]
+
+
+def test_destino_ocupado_conta_como_mesmo_nome():
+    destino = "cliente/painel/a.pdf"
+    achados = conflitos_do_envio("a.pdf", '"novo"', [Objeto(destino, '"velho"')], destino)
+    assert achados.mesmo_nome == [destino]
+
+
+def test_sem_conflito_segue():
+    assert decidir_conflito(Conflitos(), None, None) == []
+
+
+def test_identico_nunca_prossegue():
+    with pytest.raises(ConflitoNoAcervo) as erro:
+        decidir_conflito(Conflitos(identicos=["x"]), "manter_ambos", None)
+    assert erro.value.pode_prosseguir is False
+
+
+def test_mesmo_nome_sem_acao_pergunta():
+    with pytest.raises(ConflitoNoAcervo) as erro:
+        decidir_conflito(Conflitos(mesmo_nome=["x"]), None, None)
+    assert erro.value.pode_prosseguir is True
+
+
+def test_substituir_sem_lista_substitui_todos_os_do_conflito():
+    assert decidir_conflito(Conflitos(mesmo_nome=["x", "y"]), "substituir", None) == ["x", "y"]
+
+
+@pytest.mark.parametrize("acao,lista", [("apagar_tudo", None), ("substituir", ["z"]),
+                                        ("substituir", [])])
+def test_acao_ou_lista_invalida(acao, lista):
+    with pytest.raises(PedidoInvalido):
+        decidir_conflito(Conflitos(mesmo_nome=["x"]), acao, lista)
