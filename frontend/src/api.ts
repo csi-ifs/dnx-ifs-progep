@@ -21,6 +21,8 @@ export type DocumentoNaBase = {
   origem: string;
   /** O conteúdo volta se a origem for reprocessada (crawler do site). */
   regenerave: boolean;
+  /** FAQ dividido por pergunta: a linha é a pasta, e remover tira o FAQ inteiro. */
+  faq?: { perguntas: number; arquivos: number };
   aviso: string;
 };
 
@@ -176,7 +178,16 @@ export function confirmarIndexacao(
   chave: string,
   titulo: string,
   acao?: "substituir" | "manter_ambos",
-): Promise<{ indexado: string; situacao: string; substituidos: string[] }> {
+): Promise<{
+  indexado: string;
+  situacao: string;
+  substituidos: string[];
+  /** Presente quando o documento foi reconhecido como FAQ e dividido. */
+  faq: { perguntas: number } | null;
+  /** A versão antiga sai do índice em segundo plano (indexação em andamento). */
+  remocao_pendente: boolean;
+  aviso: string;
+}> {
   return chamar(api, token, "POST", "/acervo/indexar", {
     chave,
     titulo: titulo.trim() || undefined,
@@ -195,7 +206,12 @@ export function removerDocumento(
   api: string,
   token: string,
   chave: string,
-): Promise<{ removido: string; recuperavel_em: string; aviso: string }> {
+): Promise<{
+  removido: string;
+  recuperavel_em: string;
+  aviso: string;
+  remocao_pendente: boolean;
+}> {
   return chamar(api, token, "DELETE", "/acervo/documentos", { chave });
 }
 

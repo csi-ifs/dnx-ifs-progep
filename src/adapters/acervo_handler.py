@@ -37,23 +37,29 @@ from typing import Any, Mapping
 from urllib.parse import quote, unquote
 
 from src.domain.acervo import (
+    FAQ_ORIGINAIS_PREFIX,
     ConflitoNoAcervo,
     NaoAutorizado,
     Objeto,
     PedidoInvalido,
     chave_de_preparo,
+    chave_original_do_faq,
     chave_publicada,
     chave_removida,
     conflitos_do_envio,
     decidir_conflito,
     exige_admin,
     grupos_de_duplicatas,
+    unidade,
+    pasta_da_original,
     procedencia,
     validar_chave_do_acervo,
+    validar_documento_ou_faq,
     validar_envio,
     validar_titulo,
 )
-from src.domain.config import MAX_DOC_SIZE_BYTES, PREPARO_PREFIX
+from src.domain.config import MAX_DOC_SIZE_BYTES, PREPARO_PREFIX, DocumentSource
+from src.domain.faq import e_nome_de_faq, faq_do_documento, pasta_do_faq
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +216,41 @@ def _objetos_do_acervo(s3: Any, bucket_documentos: str) -> list[Objeto]:
     ]
 
 
+#: Até onde o envio é lido para reconhecer um FAQ. O API Gateway corta a
+#: chamada em 29 s: documento grande sem "FAQ" no nome não compensa o risco.
+LIMITE_LEITURA_FAQ = 10 * 1024 * 1024
+LIMITE_LEITURA_SEM_NOME = 2 * 1024 * 1024
+#: Tempo de leitura do texto (só PDF demora). Somado ao resto do envio, cabe
+#: com folga nos 29 s do API Gateway.
+PRAZO_LEITURA_FAQ_S = 12
+PRAZO_LEITURA_SEM_NOME_S = 5
+
+
+def _arquivos_de_faq(nome: str, dados: bytes | None, titulo: str | None) -> list[tuple[str, str]]:
+    """Os arquivos por pergunta se o envio for um FAQ; ``[]`` caso contrário."""
+    if dados is None:
+        return []
+    from src.adapters.extracao import extrair_texto
+
+    prazo = PRAZO_LEITURA_FAQ_S if e_nome_de_faq(nome) else PRAZO_LEITURA_SEM_NOME_S
+    return faq_do_documento(
+        nome, extrair_texto(nome, dados, prazo_s=prazo), nome, titulo=titulo,
+    )
+
+
+def _originais_de_faq(s3: Any, bucket_preparo: str) -> list[Objeto]:
+    """Os originais dos FAQs divididos, como se fossem a pasta (para achar reenvio)."""
+    objetos = []
+    for pagina in s3.get_paginator("list_objects_v2").paginate(
+        Bucket=bucket_preparo, Prefix=FAQ_ORIGINAIS_PREFIX
+    ):
+        for obj in pagina.get("Contents", []) or []:
+            pasta = pasta_da_original(obj["Key"])
+            if pasta:
+                objetos.append(Objeto(pasta, obj.get("ETag")))
+    return objetos
+
+
 def _indexar(
     corpo: dict,
     sub: str,
@@ -226,6 +267,13 @@ def _indexar(
     A cópia para o bucket de documentos dispara a notificação que já existe →
     Ingestor → ingestion job. Não é preciso chamar a KB daqui.
 
+    **FAQ entra dividido por pergunta** (src/domain/faq.py): a base corta
+    arquivo longo em trechos de tamanho fixo, e num FAQ a resposta de uma
+    pergunta acabava partida entre dois trechos. O documento é lido aqui; se
+    for um FAQ, vão para a base os arquivos por pergunta, em
+    ``cliente/faq/<nome>/``, e o original fica guardado fora da base
+    (``faq-originais/`` no bucket de preparo).
+
     **Antes, a conferência de cópias** (:func:`decidir_conflito`): conteúdo
     idêntico a algo do acervo é recusado; mesmo nome volta como conflito (409)
     para a tela perguntar se é versão nova (``acao="substituir"``, a antiga vai
@@ -234,49 +282,118 @@ def _indexar(
     chave = _garantir_do_usuario(corpo.get("chave", ""), sub)
     titulo = validar_titulo(corpo.get("titulo"))
     nome = chave.rsplit("/", 1)[-1]
-    destino = chave_publicada(nome)
 
-    etag = s3.head_object(Bucket=bucket_preparo, Key=chave).get("ETag")
-    conflitos = conflitos_do_envio(
-        nome, etag, _objetos_do_acervo(s3, bucket_documentos), destino
-    )
-    substituir = decidir_conflito(conflitos, corpo.get("acao"), corpo.get("substituir"))
-    if destino in substituir:
-        # A cópia nova vai sobrescrever o destino: guarda a anterior na lixeira
-        # antes, senão "substituir" seria apagar sem volta.
-        s3.copy_object(
-            Bucket=bucket_preparo,
-            Key=chave_removida(destino),
-            CopySource={"Bucket": bucket_documentos, "Key": destino},
+    cabeca = s3.head_object(Bucket=bucket_preparo, Key=chave)
+    etag = cabeca.get("ETag")
+    tamanho = int(cabeca.get("ContentLength") or 0)
+    parece_faq = bool(e_nome_de_faq(nome))
+    dados = None
+    if tamanho <= (LIMITE_LEITURA_FAQ if parece_faq else LIMITE_LEITURA_SEM_NOME):
+        dados = s3.get_object(Bucket=bucket_preparo, Key=chave)["Body"].read()
+    arquivos_faq = _arquivos_de_faq(nome, dados, titulo)
+
+    origem = DocumentSource.CLIENTE.value
+    pasta = pasta_do_faq(origem, nome) if arquivos_faq else None
+    destinos = [pasta + n for n, _ in arquivos_faq] if pasta else [chave_publicada(nome)]
+
+    acervo = _objetos_do_acervo(s3, bucket_documentos) + _originais_de_faq(s3, bucket_preparo)
+    conflitos = conflitos_do_envio(nome, etag, acervo, pasta or destinos[0])
+    acao = corpo.get("acao")
+    if pasta and acao == "manter_ambos" and any(c.startswith(pasta) for c in conflitos.mesmo_nome):
+        # As perguntas iriam para a mesma pasta e se misturariam com as do FAQ
+        # que já está lá: "manter os dois" não existe sem nomes diferentes.
+        raise PedidoInvalido(
+            "Já existe um FAQ com este nome. Para manter os dois, renomeie o arquivo "
+            "antes de enviar; se for uma versão nova, escolha substituir."
         )
+    substituir = decidir_conflito(conflitos, acao, corpo.get("substituir"))
 
-    argumentos: dict[str, Any] = {
-        "Bucket": bucket_documentos,
-        "Key": destino,
-        "CopySource": {"Bucket": bucket_preparo, "Key": chave},
-    }
-    if titulo:
-        # Metadado de objeto no S3 só trafega em ASCII (é cabeçalho HTTP), então
-        # o título acentuado vai percent-encoded e é decodificado na leitura.
-        argumentos["Metadata"] = {"titulo": quote(titulo)}
-        argumentos["MetadataDirective"] = "REPLACE"
-    s3.copy_object(**argumentos)
+    # O que vai ser sobrescrito vai antes para a lixeira — senão "substituir"
+    # seria apagar sem volta.
+    for antiga in substituir:
+        if antiga in destinos:
+            s3.copy_object(
+                Bucket=bucket_preparo,
+                Key=chave_removida(antiga),
+                CopySource={"Bucket": bucket_documentos, "Key": antiga},
+            )
+
+    if pasta:
+        for nome_parte, conteudo in arquivos_faq:
+            s3.put_object(
+                Bucket=bucket_documentos, Key=pasta + nome_parte,
+                Body=conteudo.encode("utf-8"), ContentType="text/markdown; charset=utf-8",
+            )
+        # Um original por FAQ: o anterior vai para a lixeira, junto com as
+        # perguntas antigas.
+        _originais_para_lixeira(s3, bucket_preparo, pasta)
+        s3.copy_object(
+            Bucket=bucket_preparo, Key=chave_original_do_faq(pasta, nome),
+            CopySource={"Bucket": bucket_preparo, "Key": chave},
+        )
+    else:
+        argumentos: dict[str, Any] = {
+            "Bucket": bucket_documentos,
+            "Key": destinos[0],
+            "CopySource": {"Bucket": bucket_preparo, "Key": chave},
+        }
+        if titulo:
+            # Metadado de objeto no S3 só trafega em ASCII (é cabeçalho HTTP),
+            # então o título acentuado vai percent-encoded e é decodificado na
+            # leitura.
+            argumentos["Metadata"] = {"titulo": quote(titulo)}
+            argumentos["MetadataDirective"] = "REPLACE"
+        s3.copy_object(**argumentos)
     # Só apaga o preparo depois da cópia: se a cópia falhar, o envio continua
     # na lista para nova tentativa em vez de sumir sem ter entrado na base.
     s3.delete_object(Bucket=bucket_preparo, Key=chave)
     # As outras versões saem **depois** que a nova entrou: se a remoção falhar no
     # meio, sobram as duas (o mesmo que "manter ambos"), nunca nenhuma.
-    substituidos = []
-    for antiga in substituir:
-        if antiga != destino:
-            _para_lixeira(
-                antiga, s3, kb,
-                bucket_documentos=bucket_documentos, bucket_preparo=bucket_preparo,
-                kb_id=kb_id, data_source_id=data_source_id,
-            )
-        substituidos.append(antiga)
-    return {"indexado": destino, "nome": nome, "titulo": titulo,
-            "situacao": "na fila de indexação", "substituidos": substituidos}
+    sair = [antiga for antiga in substituir if antiga not in destinos and not antiga.endswith("/")]
+    # Pasta na lista = o original guardado de um FAQ substituído por documento
+    # com outro formato (as perguntas dele já estão em `sair`).
+    for pasta_antiga in {a for a in substituir if a.endswith("/") and a != pasta}:
+        _originais_para_lixeira(s3, bucket_preparo, pasta_antiga)
+    pendentes = _remover_chaves(
+        sair, s3, kb,
+        bucket_documentos=bucket_documentos, bucket_preparo=bucket_preparo,
+        kb_id=kb_id, data_source_id=data_source_id,
+    )
+    return {
+        "indexado": pasta or destinos[0],
+        "nome": nome,
+        "titulo": titulo,
+        "situacao": "na fila de indexação",
+        "substituidos": list(substituir),
+        "faq": {"perguntas": len({n.split("-parte")[0] for n, _ in arquivos_faq
+                                  if not n.startswith("00-")})} if pasta else None,
+        "remocao_pendente": bool(pendentes),
+        # Tem cara de FAQ e não foi dividido: quem enviou precisa saber, porque
+        # um FAQ inteiro é justamente o que deixa respostas pela metade.
+        "aviso": (
+            "O nome indica um FAQ, mas as perguntas não foram reconhecidas: o "
+            "documento entrou inteiro. Peça à DNX para dividi-lo por pergunta."
+            if parece_faq and not pasta else ""
+        ),
+    }
+
+
+def _originais_para_lixeira(s3: Any, bucket_preparo: str, pasta: str) -> None:
+    """O original guardado do FAQ vai para a lixeira (fica recuperável, como tudo)."""
+    for original in _listar_chaves(s3, bucket_preparo, f"{FAQ_ORIGINAIS_PREFIX}{pasta}"):
+        s3.copy_object(
+            Bucket=bucket_preparo, Key=chave_removida(original),
+            CopySource={"Bucket": bucket_preparo, "Key": original},
+        )
+        s3.delete_object(Bucket=bucket_preparo, Key=original)
+
+
+def _listar_chaves(s3: Any, bucket: str, prefixo: str) -> list[str]:
+    return [
+        obj["Key"]
+        for pagina in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefixo)
+        for obj in pagina.get("Contents", []) or []
+    ]
 
 
 def _listar_documentos(s3: Any, bucket_documentos: str) -> dict:
@@ -315,16 +432,54 @@ def _listar_documentos(s3: Any, bucket_documentos: str) -> dict:
                 }
             )
             if len(itens) >= MAX_DOCUMENTOS:
+                itens = _faqs_numa_linha(itens)
                 return {
                     "itens": _mais_recentes_primeiro(itens),
                     "total": len(itens),
                     "truncado": True,
                 }
+    itens = _faqs_numa_linha(itens)
     return {
         "itens": _mais_recentes_primeiro(itens),
         "total": len(itens),
         "truncado": False,
     }
+
+
+def _faqs_numa_linha(itens: list[dict]) -> list[dict]:
+    """Junta as perguntas de cada FAQ dividido numa linha só.
+
+    Para quem administra o acervo, o FAQ é **um** documento: 40 linhas de
+    "09-quem-e-responsavel….md" esconderiam o resto da lista, e remover o FAQ
+    exigiria 40 cliques. A linha leva a pasta como chave — é ela que a remoção
+    recebe — e quantas perguntas tem.
+    """
+    soltos: list[dict] = []
+    por_pasta: dict[str, list[dict]] = {}
+    for item in itens:
+        un = unidade(item["chave"])
+        if un.endswith("/"):
+            por_pasta.setdefault(un, []).append(item)
+        else:
+            soltos.append(item)
+    for pasta, partes in por_pasta.items():
+        perguntas = {
+            p["nome"].split("-parte")[0] for p in partes if not p["nome"].startswith("00-")
+        }
+        datas = [p["atualizado_em"] for p in partes if p["atualizado_em"]]
+        soltos.append(
+            {
+                "chave": pasta,
+                "nome": unquote(pasta.rstrip("/").rsplit("/", 1)[-1]),
+                "tamanho": sum(p["tamanho"] for p in partes),
+                "atualizado_em": max(datas) if datas else None,
+                "origem": partes[0]["origem"],
+                "regenerave": partes[0]["regenerave"],
+                "aviso": partes[0]["aviso"],
+                "faq": {"perguntas": len(perguntas), "arquivos": len(partes)},
+            }
+        )
+    return soltos
 
 
 def _conferir(s3: Any, kb: Any, bucket_documentos: str, kb_id: str, ds_id: str) -> dict:
@@ -393,10 +548,20 @@ def _remover_documento(
 
     A ordem importa. Tirar da base antes de guardar a cópia deixaria uma janela
     em que o documento não responde e ainda não está recuperável.
+
+    A chave pode ser a **pasta de um FAQ** dividido (``cliente/faq/<nome>/``):
+    saem todas as perguntas e o original guardado.
     """
-    chave = validar_chave_do_acervo(corpo.get("chave", ""))
-    _para_lixeira(
-        chave, s3, kb,
+    chave = validar_documento_ou_faq(corpo.get("chave", ""))
+    if chave.endswith("/"):
+        chaves = _listar_chaves(s3, bucket_documentos, chave)
+        if not chaves:
+            raise PedidoInvalido("FAQ não encontrado no acervo.")
+        _originais_para_lixeira(s3, bucket_preparo, chave)
+    else:
+        chaves = [chave]
+    pendentes = _remover_chaves(
+        chaves, s3, kb,
         bucket_documentos=bucket_documentos, bucket_preparo=bucket_preparo,
         kb_id=kb_id, data_source_id=data_source_id,
     )
@@ -405,11 +570,44 @@ def _remover_documento(
         "removido": chave,
         "recuperavel_em": chave_removida(chave),
         "aviso": proc.aviso,
+        "remocao_pendente": bool(pendentes),
     }
 
 
-def _para_lixeira(
-    chave: str,
+#: ``DeleteKnowledgeBaseDocuments`` aceita até 10 documentos por chamada.
+LOTE_REMOCAO = 10
+
+
+def _indexacao_em_andamento(erro: Exception) -> bool:
+    """A base recusou porque há ingestion job rodando no data source."""
+    return "running ingestion job" in str(erro)
+
+
+def _tirar_da_base(
+    chaves: list[str], kb: Any, *, bucket_documentos: str, kb_id: str, data_source_id: str
+) -> list[str]:
+    """Tira da base; devolve as que a indexação em andamento impediu."""
+    pendentes: list[str] = []
+    for i in range(0, len(chaves), LOTE_REMOCAO):
+        lote = chaves[i : i + LOTE_REMOCAO]
+        try:
+            kb.delete_knowledge_base_documents(
+                knowledgeBaseId=kb_id,
+                dataSourceId=data_source_id,
+                documentIdentifiers=[
+                    {"dataSourceType": "S3", "s3": {"uri": f"s3://{bucket_documentos}/{c}"}}
+                    for c in lote
+                ],
+            )
+        except Exception as erro:  # noqa: BLE001 - só um tipo é esperado
+            if not _indexacao_em_andamento(erro):
+                raise
+            pendentes.extend(lote)
+    return pendentes
+
+
+def _remover_chaves(
+    chaves: list[str],
     s3: Any,
     kb: Any,
     *,
@@ -417,23 +615,94 @@ def _para_lixeira(
     bucket_preparo: str,
     kb_id: str,
     data_source_id: str,
-) -> None:
-    s3.copy_object(
-        Bucket=bucket_preparo,
-        Key=chave_removida(chave),
-        CopySource={"Bucket": bucket_documentos, "Key": chave},
+) -> list[str]:
+    """Lixeira e base para cada chave; devolve as que ficaram para depois.
+
+    **A base recusa remover documento enquanto há indexação rodando** — o que
+    é comum logo depois de um envio, e certo numa substituição (a versão nova
+    acabou de disparar uma). O painel não pode esperar a indexação (o API
+    Gateway corta em 29 s), então o que sobrar é entregue a uma invocação
+    assíncrona desta Lambda (:func:`_tarefa_interna`), que espera e termina. O
+    arquivo já saiu do bucket e está na lixeira; só a retirada do índice atrasa.
+    """
+    if not chaves:
+        return []
+    for chave in chaves:
+        s3.copy_object(
+            Bucket=bucket_preparo,
+            Key=chave_removida(chave),
+            CopySource={"Bucket": bucket_documentos, "Key": chave},
+        )
+        s3.delete_object(Bucket=bucket_documentos, Key=chave)
+    pendentes = _tirar_da_base(
+        chaves, kb, bucket_documentos=bucket_documentos, kb_id=kb_id,
+        data_source_id=data_source_id,
     )
-    s3.delete_object(Bucket=bucket_documentos, Key=chave)
-    kb.delete_knowledge_base_documents(
-        knowledgeBaseId=kb_id,
-        dataSourceId=data_source_id,
-        documentIdentifiers=[
-            {
-                "dataSourceType": "S3",
-                "s3": {"uri": f"s3://{bucket_documentos}/{chave}"},
-            }
-        ],
+    if pendentes:
+        _agendar_remocao(pendentes)
+    return pendentes
+
+
+#: Evento da remoção em segundo plano. Só chega por invocação direta (a role
+#: do painel invoca a própria Lambda); evento do API Gateway sempre traz
+#: ``httpMethod``, e é isso que o separa no :func:`handler`.
+TAREFA_REMOVER = "remover_da_base"
+
+#: Folga antes do fim do tempo da invocação: se a indexação não acabou até lá,
+#: a invocação falha de propósito e a Lambda tenta de novo mais tarde.
+FOLGA_MS = 40_000
+ESPERA_S = 20
+
+
+def _agendar_remocao(chaves: list[str], cliente: Any = None) -> None:
+    cliente = cliente or _lambda()
+    cliente.invoke(
+        FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+        InvocationType="Event",
+        Payload=json.dumps({"interno": TAREFA_REMOVER, "chaves": chaves}).encode(),
     )
+    logger.info("Remoção da base adiada (indexação em andamento): %d documento(s)", len(chaves))
+
+
+def _tarefa_interna(
+    evento: Mapping[str, Any], contexto: Any, s3: Any, kb: Any, *, dormir: Any = None
+) -> dict:
+    """Termina a remoção que a indexação em andamento impediu."""
+    import time
+
+    dormir = dormir or time.sleep
+    bucket_documentos = os.environ["KB_BUCKET"]
+    chaves = [validar_chave_do_acervo(c) for c in evento.get("chaves") or []]
+    # Se o documento voltou ao bucket nesse meio-tempo (reenviado), não é
+    # para tirá-lo da base.
+    restantes = [c for c in chaves if not _existe(s3, bucket_documentos, c)]
+    while restantes:
+        restantes = _tirar_da_base(
+            restantes, kb, bucket_documentos=bucket_documentos,
+            kb_id=os.environ["KNOWLEDGE_BASE_ID"], data_source_id=os.environ["DATA_SOURCE_ID"],
+        )
+        if not restantes:
+            break
+        tempo = contexto.get_remaining_time_in_millis() if contexto else FOLGA_MS * 2
+        if tempo < FOLGA_MS:
+            # Falha de propósito: a Lambda reenvia o evento (2 tentativas,
+            # FunctionEventInvokeConfig) e a espera continua lá.
+            raise RuntimeError(f"Indexação ainda em andamento; {len(restantes)} a remover")
+        dormir(ESPERA_S)
+    logger.info("Remoção em segundo plano concluída: %d documento(s)", len(chaves))
+    return {"removidos": chaves}
+
+
+def _existe(s3: Any, bucket: str, chave: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=chave)
+        return True
+    except Exception as erro:  # noqa: BLE001
+        resposta = getattr(erro, "response", None) or {}
+        codigo = str(resposta.get("Error", {}).get("Code", ""))
+        if codigo in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
 
 
 def _duplicatas(s3: Any, bucket_documentos: str) -> dict:
@@ -441,7 +710,7 @@ def _duplicatas(s3: Any, bucket_documentos: str) -> dict:
     grupos = grupos_de_duplicatas(_objetos_do_acervo(s3, bucket_documentos))
     for grupo in grupos:
         grupo["documentos"] = [
-            {"chave": c, "nome": unquote(c.rsplit("/", 1)[-1]),
+            {"chave": c, "nome": unquote(c.rstrip("/").rsplit("/", 1)[-1]),
              "origem": procedencia(c).origem}
             for c in grupo["chaves"]
         ]
@@ -504,6 +773,12 @@ def handler(
     custos_store: Any = None,
 ) -> dict[str, Any]:
     """Ponto de entrada do painel de acervo."""
+    if evento.get("interno") == TAREFA_REMOVER and "httpMethod" not in evento:
+        return _tarefa_interna(
+            evento, contexto,
+            s3_client if s3_client is not None else _s3(),
+            kb_client if kb_client is not None else _kb(),
+        )
     rota = _rota(evento)
     if rota.startswith("OPTIONS "):
         return {"statusCode": 204, "headers": _cors(), "body": ""}
@@ -593,6 +868,12 @@ def _custos_store() -> Any:
     from src.adapters.custos_store import CustosStore
 
     return CustosStore(os.environ["CUSTOS_TABLE"], region_name=os.environ.get("AWS_REGION"))
+
+
+def _lambda() -> Any:
+    import boto3
+
+    return boto3.client("lambda", region_name=os.environ.get("AWS_REGION"))
 
 
 def _kb() -> Any:

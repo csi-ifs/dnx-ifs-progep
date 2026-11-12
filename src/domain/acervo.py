@@ -242,7 +242,7 @@ def nome_base(chave: str) -> str:
     (``x.docx (1).pdf``) também saem: é assim que chega a cópia baixada duas
     vezes.
     """
-    nome = chave.rsplit("/", 1)[-1]
+    nome = chave.rstrip("/").rsplit("/", 1)[-1]
     nome = unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode()
     nome = nome.lower()
     for _ in range(3):  # "x.docx (1).pdf" → "x.docx (1)" → "x.docx" → "x"
@@ -252,6 +252,20 @@ def nome_base(chave: str) -> str:
         if nome == anterior:
             break
     return re.sub(r"[^a-z0-9]+", " ", nome).strip()
+
+
+def unidade(chave: str) -> str:
+    """O documento a que a chave pertence, para comparar nomes.
+
+    FAQ dividido por pergunta (``…/faq/<nome do FAQ>/09-….md``, ver
+    src/domain/faq.py) é **um** documento: a pasta. Sem isso, as duas versões
+    do FAQ NAPA viravam 19 pares "mesmo nome", um por pergunta, e o envio de uma
+    versão nova do FAQ não perceberia que ele já está na base, dividido.
+    """
+    partes = chave.split("/")
+    if len(partes) >= 4 and partes[-3] == "faq":
+        return "/".join(partes[:-1]) + "/"
+    return chave
 
 
 def conteudo_hash(etag: str | None) -> str | None:
@@ -299,11 +313,15 @@ def conflitos_do_envio(
     alvo_nome = nome_base(nome)
     achados = Conflitos()
     for obj in acervo:
-        if obj.chave.endswith("/"):
+        # Marcador de "pasta" do S3 não é documento; a pasta de um FAQ dividido
+        # (o original guardado, ver `pasta_da_original`) é.
+        if obj.chave.endswith("/") and not e_pasta_de_faq(obj.chave):
             continue
         if alvo_hash and conteudo_hash(obj.etag) == alvo_hash:
             achados.identicos.append(obj.chave)
-        elif obj.chave == destino or (alvo_nome and nome_base(obj.chave) == alvo_nome):
+        elif obj.chave == destino or (
+            alvo_nome and nome_base(unidade(obj.chave)) == alvo_nome
+        ):
             achados.mesmo_nome.append(obj.chave)
     return achados
 
@@ -409,8 +427,9 @@ def grupos_de_duplicatas(acervo: Iterable[Objeto]) -> list[dict]:
 
     por_nome: dict[str, list[str]] = defaultdict(list)
     for obj in objetos:
-        if _conta_como_copia(obj.chave):
-            por_nome[nome_base(obj.chave)].append(obj.chave)
+        un = unidade(obj.chave)
+        if _conta_como_copia(un) and un not in por_nome[nome_base(un)]:
+            por_nome[nome_base(un)].append(un)
     grupos += [
         {"tipo": "mesmo_nome", "chaves": sorted(chaves)}
         for nome, chaves in por_nome.items()
@@ -439,3 +458,45 @@ def validar_chave_do_acervo(chave: str) -> str:
     if chave.endswith("/"):
         raise PedidoInvalido("Caminho de documento inválido.")
     return chave
+
+
+# --- FAQ dividido por pergunta ---------------------------------------------------
+# Um FAQ enviado pelo painel entra na base já dividido (src/domain/faq.py), em
+# `<origem>/faq/<nome do FAQ>/`. Para o painel, a pasta é **um** documento:
+# lista, remove e substitui o FAQ inteiro.
+
+#: O arquivo original do FAQ, guardado no bucket de preparo — fora de qualquer
+#: data source, então não compete na busca com as perguntas divididas. Serve
+#: para baixar o original e para reconhecer o reenvio do mesmo arquivo.
+FAQ_ORIGINAIS_PREFIX = "faq-originais/"
+
+_PASTA_DE_FAQ = re.compile(r"^(?:%s)/faq/[^/]+/$" % "|".join(s.value for s in DocumentSource))
+
+
+def chave_original_do_faq(pasta: str, nome_arquivo: str) -> str:
+    return f"{FAQ_ORIGINAIS_PREFIX}{pasta}{nome_arquivo}"
+
+
+def pasta_da_original(chave: str) -> str | None:
+    """``faq-originais/cliente/faq/X/X.pdf`` → ``cliente/faq/X/``."""
+    if not chave.startswith(FAQ_ORIGINAIS_PREFIX):
+        return None
+    resto = chave[len(FAQ_ORIGINAIS_PREFIX):]
+    pasta = resto.rsplit("/", 1)[0] + "/"
+    return pasta if _PASTA_DE_FAQ.match(pasta) else None
+
+
+def e_pasta_de_faq(chave: str) -> bool:
+    return bool(_PASTA_DE_FAQ.match(chave)) and ".." not in chave
+
+
+def validar_documento_ou_faq(chave: str) -> str:
+    """Como :func:`validar_chave_do_acervo`, aceitando também a pasta de um FAQ."""
+    bruta = str(chave or "").strip().lstrip("/")
+    if bruta.endswith("/"):
+        if e_pasta_de_faq(bruta) and not any(
+            unicodedata.category(c)[0] == "C" for c in bruta
+        ):
+            return bruta
+        raise PedidoInvalido("Caminho de documento inválido.")
+    return validar_chave_do_acervo(bruta)

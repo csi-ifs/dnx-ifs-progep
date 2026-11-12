@@ -87,11 +87,19 @@ export function Acervo({
         acao,
       );
       esquecerConflito(item.chave);
-      setAviso(
-        r.substituidos?.length
-          ? `"${item.nome}" entrou na fila de indexação. A versão anterior foi para a lixeira (recuperável por 30 dias).`
+      const partes = [
+        r.faq
+          ? `"${item.nome}" foi reconhecido como FAQ e dividido em ${r.faq.perguntas} perguntas, para cada resposta chegar inteira ao assistente. Entrou na fila de indexação.`
           : `"${item.nome}" entrou na fila de indexação.`,
-      );
+      ];
+      if (r.substituidos?.length) {
+        partes.push("A versão anterior foi para a lixeira (recuperável por 30 dias).");
+      }
+      if (r.remocao_pendente) {
+        partes.push("Ela deixa de ser usada nas respostas em alguns minutos, quando a indexação em andamento terminar.");
+      }
+      if (r.aviso) partes.push(r.aviso);
+      setAviso(partes.join(" "));
       await recarregar();
     } catch (e) {
       const conflito = conflitoDoErro(e);
@@ -230,6 +238,31 @@ export function Acervo({
  * das vagas na busca e empurra para fora o trecho de outro documento. Mesmo
  * nome pode ser versão nova ou documento diferente — quem sabe é quem enviou.
  */
+/**
+ * Um FAQ dividido aparece no conflito como dezenas de arquivos (uma pergunta
+ * cada) mais a pasta. Para quem está na tela é um documento só: "FAQ X (FAQ,
+ * 40 perguntas)".
+ */
+function documentosDoConflito(chaves: string[]): string[] {
+  const perguntas = new Map<string, number>();
+  const soltos: string[] = [];
+  for (const chave of chaves) {
+    const m = chave.match(/^(.*\/faq\/[^/]+\/)(.*)$/);
+    if (!m) {
+      soltos.push(chave);
+      continue;
+    }
+    const n = m[2] && !m[2].startsWith("00-") ? 1 : 0;
+    perguntas.set(m[1], (perguntas.get(m[1]) ?? 0) + n);
+  }
+  return [
+    ...soltos,
+    ...[...perguntas].map(([pasta, n]) =>
+      n ? `${pasta} (FAQ, ${n} pergunta${n > 1 ? "s" : ""})` : `${pasta} (FAQ)`,
+    ),
+  ];
+}
+
 function AvisoDeConflito({
   conflito,
   ocupado,
@@ -243,7 +276,9 @@ function AvisoDeConflito({
   aoManterAmbos: () => void;
   aoCancelar: () => void;
 }) {
-  const lista = conflito.pode_prosseguir ? conflito.mesmo_nome : conflito.identicos;
+  const lista = documentosDoConflito(
+    conflito.pode_prosseguir ? conflito.mesmo_nome : conflito.identicos,
+  );
   return (
     <div className="confirmacao">
       <p className="alerta">

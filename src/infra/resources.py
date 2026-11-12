@@ -382,6 +382,7 @@ class ArnContext:
     log_group: str = "/progep-ifs/*"
     lambda_log_group: str = "/aws/lambda/progep-ifs-*"
     agent_function: str = "progep-ifs-agent"
+    acervo_function: str = "progep-ifs-acervo"
     connect_instance_id: str = "*"
 
 
@@ -678,6 +679,15 @@ def build_component_policies(ctx: ArnContext | None = None) -> dict[str, IamPoli
                 _kb_arn(c),
                 sid="AcervoNaBaseDeConhecimento",
             ),
+            # Remoção em segundo plano: a base recusa tirar documento enquanto
+            # há indexação rodando, e o painel não pode esperar (o API Gateway
+            # corta em 29 s). A Lambda reinvoca a si mesma, assíncrona, para
+            # terminar a remoção quando a indexação acabar.
+            build_statement(
+                "lambda:InvokeFunction",
+                f"arn:{c.partition}:lambda:{c.region}:{c.account_id}:function:{c.acervo_function}",
+                sid="RemocaoEmSegundoPlano",
+            ),
             # Aba "Custos": só leitura da tabela que as Lambdas de custos gravam.
             build_statement(
                 ["dynamodb:Query", "dynamodb:GetItem"],
@@ -697,6 +707,27 @@ def build_component_policies(ctx: ArnContext | None = None) -> dict[str, IamPoli
         "monitor_role": monitor,
         "acervo_role": acervo,
     }
+
+
+#: Versão do pypdf da camada do painel (Python puro: instala igual em qualquer
+#: sistema, sem compilar). Trocar a versão monta a camada de novo.
+PYPDF_VERSAO = "4.1.0"
+
+
+def _montar_camada_pypdf() -> str:
+    """Pasta da camada (``build/camada-pypdf-<versão>/python/pypdf``), montada se faltar."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pasta = Path("build") / f"camada-pypdf-{PYPDF_VERSAO}"
+    if not (pasta / "python" / "pypdf").is_dir():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
+             "--target", str(pasta / "python"), f"pypdf=={PYPDF_VERSAO}"],
+            check=True,
+        )
+    return str(pasta)
 
 
 def component_policy_documents(ctx: ArnContext | None = None) -> dict[str, dict]:
@@ -1468,6 +1499,18 @@ def define_resources(
         ),
         opts=opts,
     )
+    # Camada com o pypdf (Python puro, sem binário): é o que deixa o painel ler
+    # o texto de um PDF e dividir um FAQ por pergunta já no envio. Montada aqui
+    # mesmo, se ainda não existir — um `pulumi up` numa máquina nova não pode
+    # depender de um passo manual esquecido.
+    r["camada_pypdf"] = aws.lambda_.LayerVersion(
+        f"{name_prefix}-pypdf",
+        layer_name=f"{name_prefix}-pypdf",
+        compatible_runtimes=["python3.12"],
+        code=pulumi.FileArchive(_montar_camada_pypdf()),
+        description=f"pypdf {PYPDF_VERSAO} para o painel de acervo",
+        opts=opts,
+    )
     # Painel de acervo: envio, confirmação e remoção de documentos pela PROGEP.
     # Função própria (e não uma rota da Lambda da API) para que a permissão de
     # apagar no bucket de documentos fique isolada nesta role — a Lambda que
@@ -1479,8 +1522,13 @@ def define_resources(
         runtime="python3.12",
         handler="src.adapters.acervo_handler.handler",
         code=lambda_code,
-        timeout=30,
+        # As chamadas do painel terminam bem antes (o API Gateway corta em
+        # 29 s); os 300 s são da remoção em segundo plano, que espera a
+        # indexação em andamento acabar.
+        timeout=300,
         memory_size=512,
+        # pypdf: lê o texto do PDF para reconhecer e dividir FAQs no envio.
+        layers=[r["camada_pypdf"].arn],
         environment=aws.lambda_.FunctionEnvironmentArgs(
             variables={
                 "KB_BUCKET": r["documents_bucket"].bucket,
@@ -2130,6 +2178,17 @@ def define_resources(
         source_arn=r["api_gateway"].execution_arn.apply(lambda arn: f"{arn}/*/*"),
         opts=opts,
     )
+    # Remoção em segundo plano (acervo_handler._tarefa_interna): se a indexação
+    # ainda não acabou quando o tempo da invocação esgota, a própria Lambda
+    # tenta de novo (2 vezes, com intervalo crescente). Uma hora de validade
+    # basta: indexação do acervo leva minutos.
+    aws.lambda_.FunctionEventInvokeConfig(
+        f"{name_prefix}-acervo-async",
+        function_name=r["acervo_lambda"].name,
+        maximum_retry_attempts=2,
+        maximum_event_age_in_seconds=3600,
+        opts=opts,
+    )
     for rid, motivo in (
         (f"{name_prefix}-acervo", "aws.apigateway.Resource não suporta tags"),
         (f"{name_prefix}-acervo-proxy", "aws.apigateway.Resource não suporta tags"),
@@ -2144,6 +2203,11 @@ def define_resources(
             "aws.apigateway.Integration não suporta tags",
         ),
         (f"{name_prefix}-acervo-gw-perm", "aws.lambda.Permission não suporta tags"),
+        (f"{name_prefix}-pypdf", "aws.lambda.LayerVersion não suporta tags"),
+        (
+            f"{name_prefix}-acervo-async",
+            "aws.lambda.FunctionEventInvokeConfig não suporta tags",
+        ),
     ):
         out.tagging_exceptions.register(rid, motivo)
     api_deployment = aws.apigateway.Deployment(

@@ -224,6 +224,7 @@ Os que não suportam são registrados no output `tagging_exceptions` do Pulumi.
 | `ingest_repositorio.py` | Ingestão do pacote `.zip` enviado pelo cliente |
 | `transcribe_flows.py` | Transcreve os 94 fluxogramas BPMN (imagens) |
 | `ocr_documentos.py` | OCR de PDFs digitalizados |
+| `dividir_faq.py` | Divide um FAQ do acervo em um arquivo por pergunta e tira o original da base (§4.5) |
 | `check_flows.py` | Varredura de qualidade das transcrições |
 | `run_qa_suite.py` | Bateria de perguntas contra o runtime |
 | `testa_conversa.py` | Testa continuidade de conversa (follow-ups) |
@@ -263,6 +264,7 @@ também muda pelo painel (§8):
 | `site/mapeamento-processos/` | 94 | Transcrições dos fluxogramas BPMN |
 | `cliente/` | 123 | Repositório enviado pela PROGEP |
 | `cliente/ocr/` | 2 | PDFs digitalizados, via OCR |
+| `cliente/faq/`, `site/faq/` | 121 | FAQs divididos por pergunta (§4.5) |
 
 O repositório do cliente vem organizado por departamento — DAP (73), DSDPES
 (26), DNAGS (11), SIASS (11), PROGEP (2) — e a sigla é preservada no caminho do
@@ -363,6 +365,80 @@ confira o formato antes de procurar bug.
 - **O modelo só vê o texto dos trechos**, não o nome nem a data do arquivo. A
   regra de "preferir o mais recente" do prompt só funciona quando a data está
   no próprio trecho.
+
+### 4.5 FAQs divididos por pergunta
+
+**O problema.** A base corta cada arquivo em trechos de tamanho fixo (§4.2),
+sem saber onde uma pergunta começa. Num FAQ longo, a resposta de uma pergunta
+pode ficar partida entre dois trechos. Caso real (12/11/2026): no FAQ de
+estágio probatório (28 mil caracteres), "Quem é responsável por avaliar o
+servidor?" ficou com a parte dos nomeados a partir de 07/02/2025 num trecho e a
+dos nomeados até 06/02/2025 no seguinte — o assistente respondia só a metade
+que a busca trazia. Na pergunta sobre o docente, nenhum trecho do FAQ chegou
+entre os primeiros: a resposta cortada não dizia mais de que assunto tratava.
+
+**A correção.** `scripts/dividir_faq.py` grava **um arquivo por pergunta** em
+`<origem>/faq/<nome do FAQ>/NN-pergunta.md`, cada um com o título do FAQ e a
+pergunta no topo, e tira o original da base (guardado em `faq-originais/`). A lógica fica
+em `src/domain/faq.py`:
+
+- reconhece os formatos do acervo: "9. …?", "2 - …?", "N. Tema" seguido de
+  "Pergunta: …?", pergunta quebrada em várias linhas pelo PDF, título
+  afirmativo sem "?" ("9 - Atestado devolvido sem ação do servidor") e sumário
+  no início (descartado — ele casa com a busca e não tem resposta);
+- a numeração precisa seguir em sequência (aceita pular um número), o que
+  impede um inciso "2. sessenta dias" de virar pergunta;
+- resposta maior que ~4.000 caracteres é dividida em partes nos parágrafos (ou
+  nas frases), cada parte repetindo o título e a pergunta;
+- se não reconhecer nenhuma pergunta, não envia nada.
+
+O rótulo da fonte continua sendo o nome do FAQ (`fontes.rotulo_da_fonte` usa a
+pasta), e o painel trata a pasta como **um** documento na conferência de
+cópias. A página de FAQ do site é enviada já dividida pelo `ingest_site.py`
+(`FAQ_PAGES`).
+
+Divididos em 12/11/2026: estágio probatório (40 perguntas), Perícia Oficial
+(31), FAQ NAPA `.docx` e `.pdf` (19 cada) e o FAQ do site (10). O FAQ de
+adicionais ocupacionais (`.md`, 2,8 mil caracteres) já cabe num trecho.
+
+**FAQ enviado pelo painel é dividido sozinho** (desde 12/11/2026). Ao
+confirmar a indexação, a Lambda `progep-ifs-acervo` lê o texto
+(`src/adapters/extracao.py`: PDF pela camada `progep-ifs-pypdf`, DOCX e HTML
+pela biblioteca padrão) e decide se é FAQ (`faq.e_faq`):
+
+- **com "FAQ" ou "Perguntas frequentes" no nome**: basta reconhecer 3
+  perguntas;
+- **sem isso no nome**: 5 perguntas ou mais, 70% terminando em "?" e 80% com
+  resposta de pelo menos 40 caracteres. A última condição existe por causa de
+  um falso positivo real: o checklist anexo à Resolução CS 348 ("Está no
+  efetivo exercício? ( ) sim ( ) não"). Conferido no acervo inteiro (427
+  documentos): nenhum outro falso positivo.
+
+Sendo FAQ, entram na base os arquivos por pergunta em `cliente/faq/<nome>/`, e
+o original fica guardado em `progep-ifs-staging/faq-originais/<pasta>/` (fora
+de qualquer data source e da expiração da lixeira). Para o painel, o FAQ é
+**um** documento: aparece numa linha ("FAQ · 40 perguntas"), e remover ou
+substituir afeta todas as perguntas e o original. Reenviar o mesmo arquivo é
+recusado como cópia idêntica (o `ETag` do original guardado). "Manter os dois"
+com o mesmo nome de FAQ é recusado: as perguntas se misturariam na pasta.
+
+A leitura tem prazo (12 s para nome de FAQ, 5 s para os demais; arquivo acima
+de 10 MB ou de 2 MB, respectivamente, nem é lido), porque o API Gateway corta
+em 29 s e o `pypdf` leva dezenas de segundos em alguns PDFs grandes. Se o nome
+indica FAQ e as perguntas não foram reconhecidas, o documento entra inteiro e
+a tela avisa para pedir a divisão à DNX.
+
+**O script** serve para FAQ que entrou por outro caminho (repositório, site) ou
+que o painel não conseguiu dividir:
+
+```bash
+python scripts/dividir_faq.py --chave "cliente/painel/<FAQ>.pdf" --dry-run --saida docs/faq
+python scripts/dividir_faq.py --chave "cliente/painel/<FAQ>.pdf" --remover-original --kb-id INLYXJCFOW --ds-id I50FTDPEQ6
+```
+
+O `--dry-run` mostra quantas perguntas foram reconhecidas e grava os arquivos
+para conferir. `DeleteKnowledgeBaseDocuments` é recusado enquanto houver
+indexação em andamento; o script espera (até ~10 min) e tenta de novo.
 
 ---
 
@@ -1059,8 +1135,20 @@ usuário `teste-acervo`.
      podem ser substituídas chaves que estão na lista do conflito.
 4. **Remoção** (`DELETE /acervo/documentos`) vale para **qualquer** documento da
    base, não só os do painel: copia para `progep-ifs-staging/removidos/<chave
-   original>` (30 dias), apaga do bucket e chama `DeleteKnowledgeBaseDocuments`.
-   Auditado em 29/09/2026: os vetores saem do índice por completo.
+   original>` (30 dias), apaga do bucket e chama `DeleteKnowledgeBaseDocuments`
+   (em lotes de 10). Auditado em 29/09/2026: os vetores saem do índice por
+   completo. A chave pode ser a pasta de um FAQ dividido (§4.5).
+
+   **Remoção durante indexação.** `DeleteKnowledgeBaseDocuments` é recusado
+   ("running ingestion job") enquanto houver indexação no data source — comum
+   logo depois de um envio e certo numa substituição. O painel não espera: o
+   arquivo já está na lixeira, a resposta sai com `remocao_pendente: true`, e
+   a Lambda invoca a si mesma de forma assíncrona (`_tarefa_interna`) para
+   tirar do índice quando a indexação acabar. Ela espera até o fim do próprio
+   tempo (300 s) e, se não deu, falha de propósito para a Lambda tentar de
+   novo (2 vezes, `FunctionEventInvokeConfig`). Documento que voltou ao bucket
+   nesse meio-tempo não é tirado da base. O evento interno só é aceito sem
+   `httpMethod`, então não é alcançável pela API.
 5. **Restaurar:** copiar de `removidos/<chave>` de volta para a chave original
    no bucket de documentos (o Ingestor reindexa).
 
@@ -1443,12 +1531,18 @@ são para quem continuar a evoluí-lo.
 6. **Integração com o site** — a API está pronta, mas não foi integrada ao site
    (o foco foi o WhatsApp). O guia está em §5.5.
 7. **Encurtar respostas** — a cauda lenta (p90 ~9 s) são as respostas longas.
-8. **Reescrita de pergunta** para o vocabulário normativo antes da busca —
+8. **Divisão por estrutura para todo o acervo** — hoje só os FAQs são
+   divididos pelo conteúdo (§4.5), por script. A forma geral é uma Lambda de
+   *custom transformation* no data source, que recebe cada documento na
+   indexação e devolve os trechos cortados nos títulos, artigos ou perguntas
+   (tamanho variável), em vez do corte por tamanho. Exige data source novo (a
+   estratégia de divisão não muda num data source existente) e reindexar tudo.
+9. **Reescrita de pergunta** para o vocabulário normativo antes da busca —
    alternativa técnica ao FAQ; custa uma chamada de LLM.
-9. **OCR no pipeline de ingestão** — hoje é passo manual (`ocr_documentos.py`).
-10. **Limpar as `pending_operations`** antigas da stack Pulumi (§11).
-11. **Subir o moto** para destravar o teste de integração (§9.3).
-12. **Observabilidade das conversas (Langfuse)** — avaliado em 05/10/2026 e
+10. **OCR no pipeline de ingestão** — hoje é passo manual (`ocr_documentos.py`).
+11. **Limpar as `pending_operations`** antigas da stack Pulumi (§11).
+12. **Subir o moto** para destravar o teste de integração (§9.3).
+13. **Observabilidade das conversas (Langfuse)** — avaliado em 05/10/2026 e
     não adotado. O guia v2 está sem correções de segurança desde o 1º
     trimestre de 2025; a versão atual pede Postgres, ClickHouse, Redis e S3 (no
     mínimo 4 vCPU e 16 GB, ~US$ 130–150/mês self-hosted). Ele calcula só o
@@ -1459,6 +1553,18 @@ são para quem continuar a evoluí-lo.
 ---
 
 ## 13. Changelog
+
+### 2026-11-12
+- **FAQs divididos por pergunta** (§4.5), após o 2º feedback sobre o FAQ de
+  estágio probatório: respostas sobre quem avalia e quem participa vinham pela
+  metade (só os nomeados a partir de 07/02/2025) ou da Lei 8.112. Cinco FAQs
+  divididos (121 arquivos), originais guardados em `faq-originais/`. As
+  perguntas dos prints passaram a vir completas, com os dois regimes.
+- **FAQ dividido automaticamente pelo painel** (§4.5): sem passo manual. O FAQ
+  aparece como um documento só na lista, na remoção e na substituição. Nova
+  camada `progep-ifs-pypdf`.
+- **Remoção durante indexação** deixou de dar erro no painel (§8.2): termina
+  em segundo plano.
 
 ### 2026-11-10
 - **Base com divisão hierárquica** (§4.2), após o feedback do FAQ de estágio
@@ -1475,7 +1581,7 @@ são para quem continuar a evoluí-lo.
 - **Documentação revisada** (técnica e visão geral) e novo documento de custos
   para o cliente ([custos-assistente-progep.md](custos-assistente-progep.md)),
   com o acesso à aba "Custos".
-- Langfuse avaliado e não adotado (§12, item 12).
+- Langfuse avaliado e não adotado (§12, item 13).
 
 ### 2026-10-02
 - **Aba "Custos" no painel** (§8.6): custo medido em tempo real, só da

@@ -20,6 +20,9 @@ import unicodedata
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 #: Páginas de conteúdo da PROGEP voltadas ao servidor (rotina de gestão de
 #: pessoas: licenças, capacitação, afastamentos, progressão, saúde, benefícios).
@@ -45,6 +48,14 @@ SERVIDOR_PAGES: tuple[str, ...] = (
     "https://www.ifs.edu.br/novos-projetos-e-programas-em-gestao-de-pessoas.html",
     "https://www.ifs.edu.br/editais-de-multiplicadores.html",
 )
+
+#: Páginas de FAQ: enviadas **divididas por pergunta** (src/domain/faq.py), em
+#: ``site/faq/<página>/``, e não como um HTML só — a base corta arquivo longo
+#: em trechos de tamanho fixo e a resposta de uma pergunta acabava partida
+#: entre dois trechos.
+FAQ_PAGES: frozenset[str] = frozenset({
+    "https://www.ifs.edu.br/perguntas-frequentes-faq.html",
+})
 
 #: Páginas-fonte da PROGEP (documentação e hotsite de editais).
 SEED_PAGES: tuple[str, ...] = (
@@ -178,6 +189,22 @@ def slug_for(url: str, suffix: str) -> str:
     return f"site/{text}{suffix}"
 
 
+def faq_dividido(chave_html: str, html: str) -> list[tuple[str, bytes, str]]:
+    """Os arquivos de uma página de FAQ, um por pergunta (``site/faq/<nome>/``)."""
+    from src.domain.faq import documentos, texto_de_html
+
+    nome = chave_html.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    pasta = f"site/faq/{nome}/"
+    arquivos = documentos(
+        nome.replace("-", " ").capitalize(),
+        f"site do IFS ({chave_html.split('/', 1)[-1]})",
+        texto_de_html(html),
+        # O texto antes da 1ª pergunta é o menu do portal.
+        com_apresentacao=False,
+    )
+    return [(pasta + n, c.encode("utf-8"), "text/markdown; charset=utf-8") for n, c in arquivos]
+
+
 def main(argv: list[str] | None = None) -> int:
     # Os nomes dos PDFs do site são acentuados; no console cp1252 do Windows o
     # print quebraria com UnicodeEncodeError no meio do crawl.
@@ -264,8 +291,16 @@ def main(argv: list[str] | None = None) -> int:
         if len(body) > MAX_SIZE_BYTES:
             print("  descartada: > 50 MB (Req 1.1)")
             return
-        uploads.append((slug_for(page, ".html"), body, "text/html"))
         text = body.decode("utf-8", errors="replace")
+        if page in FAQ_PAGES:
+            arquivos = faq_dividido(slug_for(page, ".html"), text)
+            if arquivos:
+                uploads.extend(arquivos)
+            else:  # formato não reconhecido: melhor inteiro que fora da base
+                print("  [!] FAQ sem perguntas reconhecidas; enviado inteiro")
+                uploads.append((slug_for(page, ".html"), body, "text/html"))
+        else:
+            uploads.append((slug_for(page, ".html"), body, "text/html"))
         for pdf in pdf_links(page, text)[: args.max_pdfs_per_page]:
             fetch_pdf(pdf)
         if follow:

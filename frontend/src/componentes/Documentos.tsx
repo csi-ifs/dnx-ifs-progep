@@ -77,7 +77,10 @@ export function Documentos({
     try {
       const r = await removerDocumento(api, await obterToken(), doc.chave);
       setAviso(
-        `"${doc.nome}" saiu da base. Recuperável por 30 dias em ${r.recuperavel_em}.`,
+        `"${doc.nome}" saiu do acervo. Recuperável por 30 dias em ${r.recuperavel_em}.` +
+          (r.remocao_pendente
+            ? " Há uma indexação em andamento: ele deixa de ser usado nas respostas em alguns minutos, quando ela terminar."
+            : ""),
       );
       setConfirmando(null);
       // Tira a linha **na hora**, sem esperar a releitura. A remoção na Knowledge
@@ -115,11 +118,20 @@ export function Documentos({
   }
 
   const ausentes = new Set(conferencia?.ausentes ?? []);
+  // FAQ dividido: a linha é a pasta, e "não responde" se alguma pergunta dela
+  // não indexou.
+  const naoResponde = (doc: DocumentoNaBase) =>
+    doc.faq
+      ? [...ausentes].some((a) => a.normalize("NFC").startsWith(doc.chave.normalize("NFC")))
+      : ausentes.has(doc.chave);
   const termo = filtro.trim().toLowerCase();
   const visiveis = termo
     ? itens.filter(
         (i) =>
-          i.nome.toLowerCase().includes(termo) || i.origem.toLowerCase().includes(termo),
+          i.nome.toLowerCase().includes(termo) ||
+          i.origem.toLowerCase().includes(termo) ||
+          // FAQ dividido: filtrar pelo nome do FAQ (a pasta) mostra as perguntas.
+          i.chave.normalize("NFC").toLowerCase().includes(termo.normalize("NFC")),
       )
     : itens;
 
@@ -226,7 +238,15 @@ export function Documentos({
                 <tr key={doc.chave}>
                   <td className="nome" title={doc.chave}>
                     {doc.nome}
-                    {ausentes.has(doc.chave) && (
+                    {doc.faq && (
+                      <span
+                        className="etiqueta"
+                        title="Dividido em um arquivo por pergunta, para cada resposta chegar inteira ao assistente."
+                      >
+                        FAQ · {doc.faq.perguntas} perguntas
+                      </span>
+                    )}
+                    {naoResponde(doc) && (
                       <span className="etiqueta etiqueta-erro">não responde</span>
                     )}
                   </td>
@@ -241,8 +261,10 @@ export function Documentos({
                       <div className="confirmacao">
                         {doc.aviso && <p className="alerta">{doc.aviso}</p>}
                         <p>
-                          Remover <strong>{doc.nome}</strong> da base? O arquivo
-                          fica recuperável por 30 dias.
+                          Remover <strong>{doc.nome}</strong> da base?
+                          {doc.faq
+                            ? ` Saem as ${doc.faq.perguntas} perguntas do FAQ. Tudo fica recuperável por 30 dias.`
+                            : " O arquivo fica recuperável por 30 dias."}
                         </p>
                         <button
                           className="perigo"

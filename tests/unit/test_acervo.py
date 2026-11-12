@@ -317,3 +317,20 @@ def test_substituir_sem_lista_substitui_todos_os_do_conflito():
 def test_acao_ou_lista_invalida(acao, lista):
     with pytest.raises(PedidoInvalido):
         decidir_conflito(Conflitos(mesmo_nome=["x"]), acao, lista)
+
+
+def test_faq_dividido_conta_como_um_documento():
+    """As duas versões do FAQ NAPA, divididas, são um par — não 19."""
+    from src.domain.acervo import grupos_de_duplicatas
+
+    acervo = [Objeto(f"cliente/faq/{pasta}/{n:02d}-p.md", f'"{pasta}{n}"')
+              for pasta in ("FAQ_NAPA", "FAQ NAPA") for n in range(1, 20)]
+    grupos = grupos_de_duplicatas(acervo)
+    assert grupos == [{"tipo": "mesmo_nome",
+                       "chaves": ["cliente/faq/FAQ NAPA/", "cliente/faq/FAQ_NAPA/"]}]
+
+
+def test_envio_de_faq_ja_dividido_e_mesmo_nome():
+    acervo = [Objeto("cliente/faq/FAQ NAPA/01-a.md", '"1"'), Objeto("cliente/faq/FAQ NAPA/02-b.md", '"2"')]
+    achados = conflitos_do_envio("FAQ NAPA.pdf", '"novo"', acervo, "cliente/painel/FAQ NAPA.pdf")
+    assert achados.mesmo_nome == ["cliente/faq/FAQ NAPA/01-a.md", "cliente/faq/FAQ NAPA/02-b.md"]

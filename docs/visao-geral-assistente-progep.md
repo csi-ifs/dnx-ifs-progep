@@ -165,6 +165,13 @@ temporária, trocada no primeiro login.
 
 - **Manter só a versão atual de cada norma.** Quando o mesmo conteúdo está na
   base em versões diferentes, o assistente pode usar a desatualizada.
+- **FAQs: manter "FAQ" ou "Perguntas frequentes" no nome do arquivo e as
+  perguntas numeradas.** O assistente lê os documentos em blocos de tamanho
+  fixo, e num FAQ longo a resposta de uma pergunta poderia ficar partida entre
+  dois blocos. Por isso o painel reconhece o FAQ no envio e o separa sozinho em
+  uma parte por pergunta — na lista ele aparece como um documento só, com o
+  número de perguntas. Se o painel avisar que não reconheceu as perguntas,
+  peça à DNX para fazer a divisão.
 - **Evitar cópias do mesmo documento.** Cópias repetidas ocupam o espaço de
   outros documentos na busca e pioram as respostas.
 - **Preferir documentos com texto.** PDFs escaneados (fotos de páginas) não têm

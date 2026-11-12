@@ -67,7 +67,12 @@ def rotulo_da_fonte(doc_id: str) -> str:
     # Transcrição de fluxograma: o leitor precisa saber que a fonte é o desenho
     # do processo (e que está pendente de validação), não uma norma.
     e_fluxo = "mapeamento-processos" in caminho
-    nome = caminho.rstrip("/").rsplit("/", 1)[-1]
+    partes = caminho.rstrip("/").split("/")
+    nome = partes[-1]
+    # FAQ dividido em um arquivo por pergunta (`.../faq/<nome do FAQ>/09-….md`,
+    # ver src/domain/faq.py): a fonte é o FAQ, não o arquivo da pergunta.
+    if len(partes) >= 3 and partes[-3] == "faq":
+        nome = partes[-2]
     # Antes de qualquer limpeza: os hifens da codificação viram espaço logo
     # abaixo, e aí não haveria mais como distinguir ``-C3-A7`` de texto.
     nome = decodificar_nome(nome)
